@@ -1,8 +1,8 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "rw",
-  "version": "0.1.0",
-  "description": "Hooks for the rw skill: answer /rw ls without a model turn, and delete a session's mirror of remote files when the session ends.",
+  "version": "0.2.0",
+  "description": "Hooks for the rw skill: Tab completion of aliases and remote skills after /rw, /rw ls without a model turn, and cleanup of a session's mirror of remote files when the session ends.",
   "author": {
     "name": "Thomas",
     "url": "https://github.com/ThomasLi10"

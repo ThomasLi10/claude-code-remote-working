@@ -38,7 +38,7 @@ git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/cl
 
 `install.sh` links `~/.claude/skills/rw` to `skills/rw` in the checkout and creates `~/.config/claude-rw/aliases` from the example. An existing `~/.claude/skills/rw` is moved to `~/.local/state/claude-rw/backups/` first, and its `aliases` file is carried over. The script is safe to run again.
 
-The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude Code loads from the skills folder by itself. Its hooks answer `/rw ls` without a model call and clean up mirrors at session end, so there is nothing to add to `settings.json`.
+The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude Code loads from the skills folder by itself. Its hooks complete aliases and remote skills when you press Tab after `/rw`, answer `/rw ls` without a model call, and clean up mirrors at session end, so there is nothing to add to `settings.json`.
 
 **Update:** `git -C ~/code/claude-code-remote-working pull`. Because of the link, the new version is live at once; hook changes apply in the next session or after `/reload-plugins`.
 
@@ -54,6 +54,8 @@ The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude 
 | `/rw api <task>` | an alias, followed by what you want done |
 | `/rw api /run-tests [args]` | run the remote's own `run-tests` skill there |
 | `/rw ls`, or just `/rw` | list the aliases |
+
+Tab completes your aliases after `/rw `, and after `/rw <target> /` the skills installed on that host. The skill lists come from a cache that rw refreshes in the background, so typing never waits on ssh.
 
 Claude keeps working on the remote until you switch targets or tell it to stop. To add an alias, ask: "add an rw alias `api` for devbox:/home/alice/code/api".
 
@@ -88,7 +90,7 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 | the skill (a link to this checkout) | `~/.claude/skills/rw` |
 | your aliases | `~/.config/claude-rw/aliases` |
 | session mirrors | `/dev/shm/claude-remote/<session id>/` |
-| cached remote skill lists | `~/.cache/claude-rw/skills/` |
+| remote skill lists cached for Tab completion | `~/.cache/claude-rw/skills/` |
 | captured shell environment, on each remote (mode 600) | `~/.cache/rw/env.sh` |
 | backups made by `install.sh` | `~/.local/state/claude-rw/backups/` |
 
@@ -108,6 +110,7 @@ skills/rw/rw                        the bash tool behind it: run, path, pull, pu
 skills/rw/aliases.example           template for ~/.config/claude-rw/aliases
 skills/rw/.claude-plugin/plugin.json
 skills/rw/hooks/hooks.json          plugin hooks: instant /rw ls, session-end cleanup
+skills/rw/hooks/register.ts         Tab completion for /rw (a hooks module)
 ```
 
 ## License

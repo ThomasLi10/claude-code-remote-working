@@ -1,6 +1,9 @@
 # Your aliases live in ~/.config/claude-rw/aliases, never in the repo
 skills/rw/aliases
 
+# Type declarations Claude Code writes next to the hooks module when it loads it
+skills/rw/.claude-plugin/types/
+
 # Backups, editor and OS leftovers
 *.bak
 *.bak-*

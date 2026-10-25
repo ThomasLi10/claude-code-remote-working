@@ -38,7 +38,7 @@ git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/cl
 
 `install.sh` 会把 `~/.claude/skills/rw` 软链到仓库里的 `skills/rw`，并用模板生成 `~/.config/claude-rw/aliases`。如果 `~/.claude/skills/rw` 已经存在，会先整个移到 `~/.local/state/claude-rw/backups/`，其中的 `aliases` 文件会迁移过来。脚本可以重复执行。
 
-skill 目录本身也是一个 Claude Code 插件（`rw@skills-dir`），Claude Code 会从 skills 目录自动加载它。插件的 hook 负责不经模型直接响应 `/rw ls`，并在会话结束时清理镜像，所以不需要改 `settings.json`。
+skill 目录本身也是一个 Claude Code 插件（`rw@skills-dir`），Claude Code 会从 skills 目录自动加载它。插件的 hook 负责在 `/rw` 后按 Tab 时补全 alias 和远端 skill、不经模型直接响应 `/rw ls`，以及在会话结束时清理镜像，所以不需要改 `settings.json`。
 
 **更新**：`git -C ~/code/claude-code-remote-working pull`。因为是软链，新版本立即生效；hook 的改动在下一个会话或执行 `/reload-plugins` 后生效。
 
@@ -54,6 +54,8 @@ skill 目录本身也是一个 Claude Code 插件（`rw@skills-dir`），Claude 
 | `/rw api <任务>` | 用 alias 指定目标，后面接要做的事 |
 | `/rw api /run-tests [参数]` | 在远端运行它自己的 `run-tests` skill |
 | `/rw ls`，或者只输入 `/rw` | 列出 alias |
+
+在 `/rw ` 后按 Tab 会补全你的 alias；在 `/rw <目标> /` 后按 Tab 会补全那台机器上安装的 skill。skill 列表来自 rw 在后台刷新的缓存，输入时不用等 ssh。
 
 在你切换目标或让它停下之前，Claude 会一直在远端工作。要加 alias，直接说："加一个 rw alias `api`，指向 devbox:/home/alice/code/api"。
 
@@ -88,7 +90,7 @@ HOST 可以是 ssh 能接受的任何写法。alias 和 ssh 主机同名时，al
 | skill（指向本仓库的软链） | `~/.claude/skills/rw` |
 | 你的 alias | `~/.config/claude-rw/aliases` |
 | 会话镜像 | `/dev/shm/claude-remote/<会话 ID>/` |
-| 远端 skill 列表缓存 | `~/.cache/claude-rw/skills/` |
+| 远端 skill 列表缓存（用于 Tab 补全） | `~/.cache/claude-rw/skills/` |
 | 采集的 shell 环境（在每台远端上，权限 600） | `~/.cache/rw/env.sh` |
 | `install.sh` 的备份 | `~/.local/state/claude-rw/backups/` |
 
@@ -108,6 +110,7 @@ skills/rw/rw                        背后的 bash 工具：run、path、pull、
 skills/rw/aliases.example           ~/.config/claude-rw/aliases 的模板
 skills/rw/.claude-plugin/plugin.json
 skills/rw/hooks/hooks.json          插件 hook：即时的 /rw ls、会话结束时的清理
+skills/rw/hooks/register.ts         /rw 的 Tab 补全（hooks 模块）
 ```
 
 ## 许可证
