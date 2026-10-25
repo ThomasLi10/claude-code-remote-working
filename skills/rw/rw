@@ -21,6 +21,7 @@
 # (default: ${XDG_CONFIG_HOME:-~/.config}/claude-rw/aliases, one "NAME HOST:DIR" per line).
 
 set -uo pipefail
+shopt -s lastpipe 2>/dev/null || true  # `{ ... } | rssh` runs rssh in this shell, so the RSSH_ERR it sets survives
 umask 077  # mirrors hold remote code; keep them private
 
 # Sessions never share a mirror, so the remote is the only state they share: an edit based on a stale
