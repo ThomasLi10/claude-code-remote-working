@@ -9,6 +9,7 @@ English | [简体中文](README.zh-CN.md)
 ```text
 /rw devbox:~/code/api fix the failing test in tests/test_auth.py
 /rw api /run-tests          # run a skill that lives on the remote
+/rw devbox:~/co<Tab>        # complete hosts and remote directories
 /rw ls                      # list your aliases: instant, no model call
 ```
 
@@ -38,7 +39,7 @@ git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/cl
 
 `install.sh` links `~/.claude/skills/rw` to `skills/rw` in the checkout and creates `~/.config/claude-rw/aliases` from the example. An existing `~/.claude/skills/rw` is moved to `~/.local/state/claude-rw/backups/` first, and its `aliases` file is carried over. The script is safe to run again.
 
-The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude Code loads from the skills folder by itself. Its hooks complete aliases and remote skills when you press Tab after `/rw`, answer `/rw ls` without a model call, and clean up mirrors at session end, so there is nothing to add to `settings.json`.
+The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude Code loads from the skills folder by itself. Its hooks complete hosts, remote directories, aliases and remote skills after `/rw`, show the current target in the status line, answer `/rw ls` without a model call, keep a turn from ending with unpushed edits, and clean up mirrors at session end, so there is nothing to add to `settings.json`.
 
 **Update:** `git -C ~/code/claude-code-remote-working pull`. Because of the link, the new version is live at once; hook changes apply in the next session or after `/reload-plugins`.
 
@@ -53,9 +54,15 @@ The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude 
 | `/rw devbox` | the remote home directory |
 | `/rw api <task>` | an alias, followed by what you want done |
 | `/rw api /run-tests [args]` | run the remote's own `run-tests` skill there |
-| `/rw ls`, or just `/rw` | list the aliases |
+| `/rw ls`, or just `/rw` | list the aliases and recent targets |
 
-Tab completes your aliases after `/rw `, and after `/rw <target> /` the skills installed on that host. The skill lists come from a cache that rw refreshes in the background, so typing never waits on ssh.
+The prompt box completes as you type:
+
+- `/rw` lists every alias, recent target and ssh host (from `~/.ssh/config`). After `/rw ` the dim hint names your aliases, and the first letters narrow the list.
+- Taking a host writes `host:` and lists the directories in its home; taking a directory lists its subdirectories, so you can walk down to the project. Git repos are marked.
+- After `/rw <target> /` it lists the skills installed on that host.
+
+Directory listings go over rw's shared ssh connection and join the list when they arrive, so typing never waits on ssh. The status line under the prompt shows the target rw last worked in.
 
 Claude keeps working on the remote until you switch targets or tell it to stop. To add an alias, ask: "add an rw alias `api` for devbox:/home/alice/code/api".
 
@@ -92,6 +99,7 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 | your aliases | `~/.config/claude-rw/aliases` |
 | session mirrors | `/dev/shm/claude-remote/<session id>/` |
 | remote skill lists cached for Tab completion | `~/.cache/claude-rw/skills/` |
+| targets rw connected to lately | `~/.cache/claude-rw/recent` |
 | captured shell environment, on each remote (mode 600) | `~/.cache/rw/env.sh` |
 | backups made by `install.sh` | `~/.local/state/claude-rw/backups/` |
 
@@ -111,7 +119,7 @@ skills/rw/rw                        the bash tool behind it: run, path, pull, pu
 skills/rw/aliases.example           template for ~/.config/claude-rw/aliases
 skills/rw/.claude-plugin/plugin.json
 skills/rw/hooks/hooks.json          plugin hooks: instant /rw ls, session-end cleanup
-skills/rw/hooks/register.ts         Tab completion for /rw (a hooks module)
+skills/rw/hooks/register.ts         completion and status line for /rw (a hooks module)
 ```
 
 ## License

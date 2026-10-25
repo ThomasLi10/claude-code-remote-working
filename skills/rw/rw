@@ -9,7 +9,7 @@
 #   rw HOST:DIR diff PATH...         diff the current remote file against the mirror copy
 #   rw HOST:DIR status               list mirror files whose edits are not on the remote yet
 #   rw HOST:DIR skills               list the remote's agent skills (name, user-only, description, SKILL.md)
-#   rw ls                            list the aliases
+#   rw ls                            list the aliases, then other targets info connected to lately
 #   rw hook pre-read|post-write|guard-search|prompt-expansion|stop|session-end   Claude Code hooks (JSON on stdin)
 #
 # PATH is relative to DIR, an absolute remote path, or a local mirror path.
@@ -82,10 +82,19 @@ alias_of() {  # alias_of NAME -> its HOST:DIR from $ALIASES; fails if there is n
   awk -v n="$1" '{ sub(/#.*/, "") } $1 == n && NF >= 2 { print $2; found = 1; exit } END { exit !found }' "$ALIASES"
 }
 
-cmd_ls() {  # cmd_ls -> every "NAME  HOST:DIR" in $ALIASES, names padded to one width
-  [ -f "$ALIASES" ] || { echo "rw: no aliases ($ALIASES does not exist)"; return 0; }
-  awk '{ sub(/#.*/, "") } NF >= 2 { n[++k] = $1; t[k] = $2; if (length($1) > w) w = length($1) }
-    END { if (!k) print "rw: no aliases in " FILENAME; for (i = 1; i <= k; i++) printf "%-" w "s  %s\n", n[i], t[i] }' "$ALIASES"
+cmd_ls() {  # cmd_ls -> every "NAME  HOST:DIR" in $ALIASES, names padded to one width; then recent other targets
+  local r
+  if [ -f "$ALIASES" ]; then
+    awk -v f="$(tilde "$ALIASES")" '{ sub(/#.*/, "") } NF >= 2 { n[++k] = $1; t[k] = $2; if (length($1) > w) w = length($1) }
+      END { if (!k) { print "rw: no aliases in " f; exit }
+        print "aliases (" f "):"; for (i = 1; i <= k; i++) printf "  %-" w "s  %s\n", n[i], t[i] }' "$ALIASES"
+  else
+    echo "rw: no aliases ($(tilde "$ALIASES") does not exist)"
+  fi
+  [ -f "$RECENT" ] || return 0
+  r=$(awk -v af="$ALIASES" 'BEGIN { while ((getline l < af) > 0) { sub(/#.*/, "", l); if (split(l, f) >= 2) a[f[2]] = 1 } }
+    !($0 in a) && n++ < 5 { print "  " $0 }' "$RECENT")
+  [ -z "$r" ] || printf '\nrecent:\n%s\n' "$r"
 }
 
 root_of() {  # root_of PATH -> the mirror root PATH is in: a session's under $BASE, $ROOT or the legacy one
@@ -199,7 +208,15 @@ done
 [ "$rw_nskills" -gt 0 ] || echo "(none)"
 EOS
 
-# The skill list of each target as the user typed it, for the prompt box's completion (rw-complete mod).
+# Targets info connected to, most recent first, for `rw ls` and the prompt box's completion.
+RECENT=${XDG_CACHE_HOME:-$HOME/.cache}/claude-rw/recent
+remember() {  # remember HOST:DIR -> move it to the top of $RECENT, which keeps 20
+  local tmp
+  mkdir -p "$(dirname "$RECENT")" && tmp=$(mktemp "$RECENT.XXXXXX") || return 0
+  { printf '%s\n' "$1"; [ ! -f "$RECENT" ] || grep -vxF -- "$1" "$RECENT"; } | head -n 20 > "$tmp" && mv -f "$tmp" "$RECENT"
+}
+
+# The skill list of each target as the user typed it, for the prompt box's completion (hooks/register.ts).
 SKILL_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/claude-rw/skills
 save_skills() {  # save_skills OUTFILE: its __RW_SKILL__ lines -> the cache file of the target as typed
   local f tmp
@@ -395,6 +412,7 @@ EOS
     f && !/^__RW_DIR__ /; /^__RW_STATUS__ /{f=1}' "$out"
   [ -n "$rdir" ] || return 1
   save_skills "$out"
+  remember "$HOST:$rdir"
   echo
   echo "== rw"
   echo "target: $HOST:$rdir"
@@ -580,7 +598,6 @@ cmd_hook() {
           r="$(cmd_ls)"$'\n'"usage: /rw NAME|HOST[:DIR] [task | /remote-skill]" ;;
         *) return 0 ;;
       esac
-      [ -f "$ALIASES" ] && r="$r"$'\n'"($(tilde "$ALIASES"))"
       # a block shows the text and ends the prompt there: no model call, and nothing is added to the context
       printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"UserPromptExpansion","suppressOriginalPrompt":true}}\n' \
         "$(json_esc "$r")"
