@@ -22,6 +22,7 @@
   - 如果远端文件在 Claude 上次读取之后被改过（另一个 Claude 会话、格式化工具、`git checkout`、编辑器），上传会被拒绝：镜像重置为远端版本，Claude 的版本另存一份，不会悄悄覆盖任何东西。
 - **每个会话有自己的镜像**：放在内存里（`/dev/shm`），权限私有（`umask 077`），会话结束时删除；如果里面还有没传到远端的修改，就会保留。
 - **远端上下文**：连接时会打印远端的 git 状态和可用工具、所有适用的 `CLAUDE.md`，以及远端安装的 agent skill（目录、所在仓库和远端用户的 `.claude/skills`、`.agents/skills`、`.codex/skills`），可以用 `/rw <target> /<skill>` 运行。
+- **后台任务**：`rw T job start NAME '<cmd>'` 在远端以脱离 ssh 的方式运行需要长期存在的命令（dev server、训练、长时间的测试），目录和环境与 `run` 相同，日志和退出码都留在远端。用 `job logs`、`job wait`、`job stop`、`job ls` 管理，Claude 可以先把任务跑起来，继续做别的，再回来看结果。
 - **防护**：镜像里只有 Claude 打开过的文件，所以在镜像里用 Grep 和 Glob 会被拦下，Claude 改用远端的 `rg`、`git grep` 或 `find` 搜索。超过 10 MB 的文件不会整个传输，Claude 会被提示改用远端的 `tail`、`grep` 看局部。会话镜像里还有没传到远端的修改时，Stop hook 会让 Claude 这一轮先不结束，并列出这些文件（只拦一次）。
 
 ## 环境要求
@@ -101,11 +102,12 @@ HOST 可以是 ssh 能接受的任何写法。alias 和 ssh 主机同名时，al
 | 远端 skill 列表缓存（用于 Tab 补全） | `~/.cache/claude-rw/skills/` |
 | 最近连过的目标 | `~/.cache/claude-rw/recent` |
 | 采集的 shell 环境（在每台远端上，权限 600） | `~/.cache/rw/env.sh` |
+| 后台任务的命令、日志和退出码（在每台远端上） | `~/.cache/rw/jobs/<名字>/` |
 | `install.sh` 的备份 | `~/.local/state/claude-rw/backups/` |
 
 ## 局限
 
-- 没有 tty：命令的 stdin 直接是 EOF，请使用非交互参数。服务、watcher 这类需要长期运行的进程放到远端的 `nohup … &` 或 tmux 里。
+- 没有 tty：命令的 stdin 直接是 EOF，请使用非交互参数。服务、watcher、长时间的任务用 `rw T job start` 跑。
 - 镜像里只有 Claude 打开过的文件，搜索在远端进行。
 - 每次读写都传输整个文件（经 ssh 的 base64）：源代码文件没问题，大文件太慢，所以超过 `RW_MAX_FILE_MB` 的文件会被拒绝。
 - 只在两端都是 Linux 的环境下测试过。
@@ -115,7 +117,7 @@ HOST 可以是 ssh 能接受的任何写法。alias 和 ssh 主机同名时，al
 ```text
 install.sh                          安装、更新、卸载
 skills/rw/SKILL.md                  skill 本体：告诉 Claude 如何通过 rw 工作
-skills/rw/rw                        背后的 bash 工具：run、path、pull、push、diff、status、skills、hooks
+skills/rw/rw                        背后的 bash 工具：run、path、pull、push、diff、status、skills、job、hooks
 skills/rw/aliases.example           ~/.config/claude-rw/aliases 的模板
 skills/rw/.claude-plugin/plugin.json
 skills/rw/hooks/hooks.json          插件 hook：即时的 /rw ls、会话结束时的清理

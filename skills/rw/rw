@@ -9,6 +9,8 @@
 #   rw HOST:DIR diff PATH...         diff the current remote file against the mirror copy
 #   rw HOST:DIR status               list mirror files whose edits are not on the remote yet
 #   rw HOST:DIR skills               list the remote's agent skills (name, user-only, description, SKILL.md)
+#   rw HOST:DIR job start NAME [CMD...] | ls | logs NAME [LINES] | wait NAME [SECONDS] | stop NAME | rm NAME
+#                                    commands that outlive the call: detached, in DIR, logged on the remote
 #   rw ls                            list the aliases, then other targets info connected to lately
 #   rw hook pre-read|post-write|guard-search|prompt-expansion|stop|session-end   Claude Code hooks (JSON on stdin)
 #
@@ -178,6 +180,28 @@ rw_env() {  # rw_env [force]: refresh the saved environment if forced, missing o
   for f in ~/.bashrc ~/.bash_profile ~/.bash_login ~/.profile; do [ "$f" -nt "$rw_envf" ] && stale=1; done
   [ -z "$stale" ] || rw_env_refresh || echo "rw: could not capture the interactive shell environment on $(hostname)" >&2
   [ ! -f "$rw_envf" ] || . "$rw_envf"
+}
+EOS
+
+# Jobs: commands that outlive the call. Each runs detached on the remote, in DIR with the environment `run`
+# gives, its files in ~/.cache/rw/jobs/NAME there: cmd, dir, log, pid, started, and exit and ended once done.
+IFS= read -r -d '' REMOTE_JOBS <<'EOS'
+rw_jobs=${XDG_CACHE_HOME:-$HOME/.cache}/rw/jobs
+rw_job_state() {  # rw_job_state JOBDIR -> running | exit N | stopped | died
+  local e
+  if [ -f "$1/exit" ]; then e=$(cat "$1/exit"); if [ "$e" = stopped ]; then echo stopped; else echo "exit $e"; fi
+  elif [ -f "$1/pid" ] && kill -0 "$(cat "$1/pid")" 2>/dev/null; then echo running
+  else echo died
+  fi
+}
+rw_age() {  # rw_age EPOCH -> how long ago, e.g. 5m
+  local s=$(( $(date +%s) - ${1:-0} ))
+  if [ $s -lt 120 ]; then echo "${s}s"; elif [ $s -lt 7200 ]; then echo "$((s / 60))m"
+  elif [ $s -lt 172800 ]; then echo "$((s / 3600))h"; else echo "$((s / 86400))d"; fi
+}
+rw_job_line() {  # rw_job_line JOBDIR -> name, state, age, dir and the command's first line
+  printf '%-16s %-10s %5s ago  %s  %s\n' "${1##*/}" "$(rw_job_state "$1")" "$(rw_age "$(cat "$1/started" 2>/dev/null)")" \
+    "$(sed "s#^$HOME#~#" "$1/dir" 2>/dev/null)" "$(head -n1 "$1/cmd" 2>/dev/null | cut -c1-60)"
 }
 EOS
 
@@ -456,6 +480,79 @@ cmd_run() {
   return $rc
 }
 
+cmd_job() {  # cmd_job start NAME [CMD...] | ls | logs NAME [LINES] | wait NAME [SECONDS] | stop NAME | rm NAME
+  local op=${1:-} name=${2:-} arg=${3:-} script= rc
+  case $op in
+    ls) ;;
+    start|logs|wait|stop|rm) [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die "job $op: NAME must be letters, digits, '.', '_' or '-'" ;;
+    *) die "job: unknown command '$op' (start|ls|logs|wait|stop|rm)" ;;
+  esac
+  case $op in
+    start)
+      shift 2
+      if [ $# -gt 0 ]; then script="$*"; else script=$(cat); fi
+      [ -n "${script//[[:space:]]/}" ] || die "job start: no command (pass it as arguments or on stdin)" ;;
+    logs|wait) [[ $arg =~ ^[0-9]*$ ]] || die "job $op: $arg is not a number" ;;
+  esac
+  {
+    printf '%s\n%s\n' "$REMOTE_ENV" "$REMOTE_JOBS"
+    printf 'op=%s; n=%s; d=%s; a=%s\n' "$op" "$(q "$name")" "$(q "$DIR")" "$(q "$arg")"
+    if [ "$op" = start ]; then
+      printf '%s\n' "rw_cmd=\$(base64 -d <<'__RW_B64__'"
+      printf '%s\n' "$script" | base64
+      printf '%s\n' '__RW_B64__' ')'
+    fi
+    cat <<'EOS'
+j=$rw_jobs/$n
+[ "$op" = start ] || [ "$op" = ls ] || [ -d "$j" ] || { echo "rw: no job named $n" >&2; exit 1; }
+case $op in
+  start)
+    cd -- "$d" 2>/dev/null || { echo "rw: remote directory not found: $d" >&2; exit 97; }
+    [ -d "$j" ] && [ "$(rw_job_state "$j")" = running ] && { echo "rw: job $n is already running; stop it first" >&2; exit 1; }
+    rw_env
+    rm -rf -- "$j" && mkdir -p -- "$j" || exit 1
+    printf '%s\n' "$rw_cmd" > "$j/cmd"; pwd > "$j/dir"; date +%s > "$j/started"
+    # setsid makes the job a process group of its own, so stop reaches its children too
+    s=; command -v setsid >/dev/null 2>&1 && s=setsid
+    nohup $s bash -c 'echo $$ > "$1/pid"; bash "$1/cmd" > "$1/log" 2>&1 < /dev/null; echo $? > "$1/exit.tmp"
+      date +%s > "$1/ended"; mv -f "$1/exit.tmp" "$1/exit"' rw-job "$j" > /dev/null 2>&1 < /dev/null &
+    sleep 1
+    echo "job $n: $(rw_job_state "$j"); log in $j/log"
+    tail -n 20 "$j/log" 2>/dev/null ;;
+  ls)
+    found=
+    for j in "$rw_jobs"/*/; do [ -d "$j" ] && rw_job_line "${j%/}" && found=1; done
+    [ -n "$found" ] || echo "(no jobs)" ;;
+  logs)
+    rw_job_line "$j"
+    echo "-- last ${a:-50} lines of $j/log"
+    tail -n "${a:-50}" "$j/log" 2>/dev/null ;;
+  wait)
+    end=$(( $(date +%s) + ${a:-600} ))
+    while [ "$(rw_job_state "$j")" = running ] && [ "$(date +%s)" -lt "$end" ]; do sleep 2; done
+    rw_job_line "$j"
+    tail -n 30 "$j/log" 2>/dev/null
+    case $(rw_job_state "$j") in running) exit 124 ;; "exit "*) exit "$(cat "$j/exit")" ;; *) exit 1 ;; esac ;;
+  stop)
+    if [ "$(rw_job_state "$j")" = running ]; then
+      p=$(cat "$j/pid")
+      kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null
+      for i in 1 2 3 4 5; do kill -0 "$p" 2>/dev/null || break; sleep 1; done
+      kill -0 "$p" 2>/dev/null && { kill -KILL -- "-$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null; }
+      [ -f "$j/exit" ] || { echo stopped > "$j/exit"; date +%s > "$j/ended"; }
+    fi
+    rw_job_line "$j" ;;
+  rm)
+    [ "$(rw_job_state "$j")" = running ] && { echo "rw: job $n is running; stop it first" >&2; exit 1; }
+    rm -rf -- "$j" && echo "removed job $n" ;;
+esac
+EOS
+  } | ssh "${SSH_OPTS[@]}" "$HOST" bash -l -s
+  rc=$?
+  [ $rc -eq 255 ] && echo "rw: ssh to $HOST failed (exit 255)" >&2
+  return $rc
+}
+
 cmd_path() {
   if [ $# -eq 0 ]; then mirror_of "$HOST" "$DIR"; return; fi
   local a; for a in "$@"; do resolve "$a"; mirror_of "$RH" "$RP"; done
@@ -657,5 +754,6 @@ case $sub in
   diff) cmd_diff "$@" ;;
   status) cmd_status "$@" ;;
   skills) cmd_skills ;;
-  *) die "unknown command '$sub' (info|run|path|pull|push|diff|status|skills)" ;;
+  job) cmd_job "$@" ;;
+  *) die "unknown command '$sub' (info|run|path|pull|push|diff|status|skills|job)" ;;
 esac

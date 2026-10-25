@@ -22,6 +22,7 @@ English | [简体中文](README.zh-CN.md)
   - An upload is refused if the remote file changed since Claude last read it (another Claude session, a formatter, `git checkout`, an editor). The mirror is reset to the remote version and Claude's version is saved aside, so nothing is overwritten silently.
 - **Each session has its own mirror**: in memory (`/dev/shm`), private (`umask 077`), and deleted when the session ends unless it holds edits that never reached the remote.
 - **Remote context**: connecting prints the remote's git state and tools, every `CLAUDE.md` that applies there, and the agent skills installed on the remote (`.claude/skills`, `.agents/skills`, `.codex/skills` of the directory, its repo and the remote user), which you run as `/rw <target> /<skill>`.
+- **Jobs**: `rw T job start NAME '<cmd>'` runs what must outlive the call (a dev server, a training run, a long test suite) detached on the remote, in the same directory and environment, its log and exit code kept there. `job logs`, `job wait`, `job stop` and `job ls` manage it, so Claude can start something, keep working, and come back to it.
 - **Guard rails**: Grep and Glob are blocked inside the mirror, which only holds the files Claude opened; Claude searches on the remote with `rg`, `git grep` or `find` instead. A file over 10 MB is not moved whole, and Claude is told to look at parts of it with `tail` or `grep` on the remote. While the session's mirror holds edits that never reached the remote, a Stop hook keeps Claude's turn going once and lists them.
 
 ## Requirements
@@ -101,11 +102,12 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 | remote skill lists cached for Tab completion | `~/.cache/claude-rw/skills/` |
 | targets rw connected to lately | `~/.cache/claude-rw/recent` |
 | captured shell environment, on each remote (mode 600) | `~/.cache/rw/env.sh` |
+| job commands, logs and exit codes, on each remote | `~/.cache/rw/jobs/<name>/` |
 | backups made by `install.sh` | `~/.local/state/claude-rw/backups/` |
 
 ## Limitations
 
-- There is no tty: commands get EOF on stdin, so use non-interactive flags. Servers and watchers go in `nohup … &` or a tmux session on the remote.
+- There is no tty: commands get EOF on stdin, so use non-interactive flags. Servers, watchers and long runs go in `rw T job start`.
 - The mirror only holds the files Claude has opened; searching happens on the remote.
 - Every read and write moves the whole file (base64 over ssh): fine for source files, too slow for big ones, which is why files over `RW_MAX_FILE_MB` are refused.
 - Tested with Linux on both ends.
@@ -115,7 +117,7 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 ```text
 install.sh                          install, update and uninstall
 skills/rw/SKILL.md                  the skill: how Claude works through rw
-skills/rw/rw                        the bash tool behind it: run, path, pull, push, diff, status, skills, hooks
+skills/rw/rw                        the bash tool behind it: run, path, pull, push, diff, status, skills, job, hooks
 skills/rw/aliases.example           template for ~/.config/claude-rw/aliases
 skills/rw/.claude-plugin/plugin.json
 skills/rw/hooks/hooks.json          plugin hooks: instant /rw ls, session-end cleanup
