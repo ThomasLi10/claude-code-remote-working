@@ -79,12 +79,13 @@ Each session has its own mirror, kept in memory and deleted when the session end
 - After a remote command that may rewrite files (formatter, codegen, `git checkout/pull/stash/rebase`), Read files again before you edit them.
 - Delete, move and chmod remotely with `run` (`git mv`, `rm`, `chmod +x`).
 - The mirror holds only the files you've opened. Don't explore it with Grep, Glob or ls (a hook blocks Grep and Glob there); search on the remote instead. Never run project commands locally in the mirror, because it isn't a checkout.
+- A file over 10 MB (`RW_MAX_FILE_MB`) isn't moved whole: Read refuses it and says so. Look at parts of it with `run` (`tail -n 200`, `grep -n`, `head -c`), or ask the user before raising the limit.
 
 If you don't see `rw: synced …` after an Edit or Write, the hooks aren't active. In that case run `rw T pull <path>` before each Read and `rw T push <path>` after each edit yourself.
 
 ## 4. Other helpers
 
-- `rw T status` lists mirror files whose edits aren't on the remote yet, for example after a failed upload. Check it before you finish; it should be clean.
+- `rw T status` lists mirror files whose edits aren't on the remote yet, for example after a failed upload. Check it before you finish; it should be clean. If it isn't, a Stop hook keeps your turn going once and lists the files: push each one after checking it with `diff`, or tell the user why it stays unpushed.
 - `rw T diff <path>` diffs the current remote file against the mirror copy.
 - `rw T pull -f <path>` throws away mirror edits. `rw T push -f <path>` overwrites the remote even if it changed. Use either only with the user's OK.
 

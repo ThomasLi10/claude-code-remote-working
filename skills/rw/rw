@@ -10,13 +10,14 @@
 #   rw HOST:DIR status               list mirror files whose edits are not on the remote yet
 #   rw HOST:DIR skills               list the remote's agent skills (name, user-only, description, SKILL.md)
 #   rw ls                            list the aliases
-#   rw hook pre-read|post-write|guard-search|prompt-expansion|session-end   Claude Code hooks (JSON on stdin)
+#   rw hook pre-read|post-write|guard-search|prompt-expansion|stop|session-end   Claude Code hooks (JSON on stdin)
 #
 # PATH is relative to DIR, an absolute remote path, or a local mirror path.
 # Each Claude Code session ($CLAUDE_CODE_SESSION_ID) has its own mirror: remote file HOST:/a/b.py is at
 # $BASE/SESSION/HOST/a/b.py, with $BASE = /dev/shm/claude-remote (memory) unless $RW_MIRROR_BASE is set.
 # "rw hook session-end" deletes a session's mirror. $RW_MIRROR forces one fixed mirror dir instead.
 # Extra ssh options can be given in $RW_SSH_OPTS (they take precedence over the defaults).
+# Files over $RW_MAX_FILE_MB megabytes (default 10, 0 for no limit) are not moved whole through the mirror.
 # HOST:DIR can also be a bare HOST (its home dir, resolved by info) or a NAME from $RW_ALIASES
 # (default: ${XDG_CONFIG_HOME:-~/.config}/claude-rw/aliases, one "NAME HOST:DIR" per line).
 
@@ -35,6 +36,8 @@ LEGACY=$HOME/.cache/claude-remote  # the old shared mirror; still recognized so 
 set_root() { ROOT=${1%/}; META=$ROOT/.meta; CONFLICTS=$ROOT/.conflicts; }
 if [ -n "${RW_MIRROR:-}" ]; then set_root "$RW_MIRROR"; else set_root "$BASE/$SID"; fi
 ALIASES=${RW_ALIASES:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-rw/aliases}
+MAX_MB=${RW_MAX_FILE_MB:-10}; [[ $MAX_MB =~ ^[0-9]+$ ]] || MAX_MB=10  # bigger files are not moved whole; 0 = no limit
+MAX_BYTES=$((MAX_MB * 1024 * 1024))
 
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4
           -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/rw-%C" -o ControlPersist=30m)
@@ -56,6 +59,10 @@ sha_stdin() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi
 }
 hash_file() { if [ -f "$1" ]; then sha_stdin < "$1"; else echo ABSENT; fi; }
+human() {  # human BYTES -> e.g. 12.3 MB
+  awk -v b="$1" 'BEGIN { split("B KB MB GB TB", u, " "); i = 1; while (b >= 1024 && i < 5) { b /= 1024; i++ }
+    printf(i == 1 ? "%d %s" : "%.1f %s", b, u[i]) }'
+}
 
 normpath() {  # lexically normalize an absolute path
   local IFS=/ part out=()
@@ -202,17 +209,18 @@ save_skills() {  # save_skills OUTFILE: its __RW_SKILL__ lines -> the cache file
   sed -n 's/^__RW_SKILL__\t//p' "$1" > "$tmp" && mv -f "$tmp" "$f"
 }
 
-# fetch HOST PATH OUTFILE -> prints ok|absent|dir|notfile|unreadable|error:<msg>
+# fetch HOST PATH OUTFILE -> prints ok|absent|dir|notfile|unreadable|toolarge <bytes>|error:<msg>
 fetch() {
   local raw st
   raw=$(tmpfile)
   {
-    printf 'f=%s\n' "$(q "$2")"
+    printf 'f=%s; max=%s\n' "$(q "$2")" "$MAX_BYTES"
     cat <<'EOS'
 if [ -d "$f" ]; then echo "__RW_STATUS__ dir"
 elif [ ! -e "$f" ]; then echo "__RW_STATUS__ absent"
 elif [ ! -f "$f" ]; then echo "__RW_STATUS__ notfile"
 elif [ ! -r "$f" ]; then echo "__RW_STATUS__ unreadable"
+elif s=$(wc -c < "$f" | tr -d ' ') && [ "$max" -gt 0 ] && [ "$s" -gt "$max" ]; then echo "__RW_STATUS__ toolarge $s"
 else echo "__RW_STATUS__ ok"; echo "__RW_BEGIN__"; base64 < "$f" && echo "__RW_END__"
 fi
 EOS
@@ -224,7 +232,7 @@ EOS
       sed -n '/^__RW_BEGIN__$/,/^__RW_END__$/{/^__RW_/d;p;}' "$raw" | base64 -d > "$3" \
         || { echo "error:cannot decode transfer"; return; }
       echo ok ;;
-    absent|dir|notfile|unreadable) echo "$st" ;;
+    absent|dir|notfile|unreadable|"toolarge "*) echo "$st" ;;
     *) echo "error:unexpected reply from $1" ;;
   esac
 }
@@ -259,7 +267,8 @@ EOS
 }
 
 # sync_down HOST PATH FORCE: make the mirror match the remote.
-# returns 0 ok, 1 error, 2 conflict (local edits saved to $SAVED), 3 kept unpushed local edits, 4 not a file
+# returns 0 ok, 1 error, 2 conflict (local edits saved to $SAVED), 3 kept unpushed local edits, 4 not a file,
+# 5 too large to move whole
 MSG= SAVED=
 sync_down() {
   local h=$1 p=$2 force=$3 m L B R st tmp rc=0
@@ -272,6 +281,9 @@ sync_down() {
     dir) MSG="$h:$p is a directory on the remote"; return 4 ;;
     notfile) MSG="$h:$p is not a regular file on the remote"; return 4 ;;
     unreadable) MSG="$h:$p is not readable on the remote"; return 1 ;;
+    "toolarge "*)
+      MSG="$h:$p is $(human "${st#toolarge }"), over the $MAX_MB MB that rw moves whole through the mirror (RW_MAX_FILE_MB). Look at parts of it on the remote instead, e.g. rw $h:<dir> run 'tail -n 200 FILE' / 'grep -n PATTERN FILE' / 'head -c 100000 FILE'"
+      return 5 ;;
     *) MSG="cannot fetch $h:$p: ${st#error:}"; return 1 ;;
   esac
   if [ "$force" != 1 ] && [ "$L" != "$B" ] && [ "$L" != "$R" ]; then
@@ -462,7 +474,12 @@ cmd_diff() {
   for a in "$@"; do
     resolve "$a"; m=$(mirror_of "$RH" "$RP"); tmp=$(tmpfile)
     st=$(fetch "$RH" "$RP" "$tmp")
-    case $st in ok) ;; absent) : > "$tmp" ;; *) echo "rw: cannot fetch $RH:$RP: $st" >&2; continue ;; esac
+    case $st in
+      ok) ;;
+      absent) : > "$tmp" ;;
+      "toolarge "*) echo "rw: $RH:$RP is $(human "${st#toolarge }"), over the $MAX_MB MB limit; diff it on the remote" >&2; continue ;;
+      *) echo "rw: cannot fetch $RH:$RP: $st" >&2; continue ;;
+    esac
     [ -f "$m" ] || m=/dev/null
     diff -u --label "remote $RH:$RP" --label "mirror $m" "$tmp" "$m" && echo "rw: $RH:$RP: mirror matches remote"
   done
@@ -504,15 +521,16 @@ in_mirror() {  # in_mirror PATH -> true if PATH is a mirrored remote file (in an
   return 1
 }
 
-has_unpushed() {  # has_unpushed ROOT -> true if a mirror file under ROOT differs from the remote as last seen
+unpushed_in() {  # unpushed_in ROOT -> HOST:PATH of each mirror file under ROOT that differs from the remote as last seen
   local f rest
   set_root "$1"
   while IFS= read -r -d '' f; do
     rest=${f#"$ROOT"/}
-    [ "$(hash_file "$f")" != "$(base_get "${rest%%/*}" "/${rest#*/}")" ] && return 0
+    [ "$(hash_file "$f")" != "$(base_get "${rest%%/*}" "/${rest#*/}")" ] && printf '%s:/%s\n' "${rest%%/*}" "${rest#*/}"
   done < <(find "$ROOT" -mindepth 2 -type f ! -path "$ROOT/.*" -print0)
-  return 1
+  return 0
 }
+has_unpushed() { [ -n "$(unpushed_in "$1")" ]; }
 
 cmd_hook() {
   local input fp rc r sid d a
@@ -567,6 +585,16 @@ cmd_hook() {
       printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"UserPromptExpansion","suppressOriginalPrompt":true}}\n' \
         "$(json_esc "$r")"
       return 0 ;;
+    stop)  # keep the turn going while this session's mirror holds edits that never reached the remote
+      sid=$(json_str session_id "$input"); sid=${sid//[^A-Za-z0-9_-]/_}
+      [ -n "$sid" ] && [ -d "$BASE/$sid" ] || return 0
+      # the second stop in a row goes through, so a file that cannot be pushed never traps the turn
+      printf '%s' "$input" | command grep -q '"stop_hook_active"[[:space:]]*:[[:space:]]*true' && return 0
+      r=$(unpushed_in "$BASE/$sid")
+      [ -n "$r" ] || return 0
+      r="rw: these mirror files have edits that never reached the remote:"$'\n'"$r"$'\n'"Check each with rw HOST:DIR diff PATH and push it with rw HOST:DIR push PATH, or tell the user why it stays unpushed."
+      printf '{"decision":"block","reason":"%s"}\n' "$(json_esc "$r")"
+      return 0 ;;
     session-end)
       sid=$(json_str session_id "$input"); sid=${sid//[^A-Za-z0-9_-]/_}
       # keep a mirror holding edits that never reached the remote; it is in memory, so a reboot clears it
@@ -583,7 +611,7 @@ cmd_hook() {
 
 # ---------------------------------------------------------------- main
 
-[ $# -ge 1 ] || { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ $# -ge 1 ] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
 if [ "$1" = hook ]; then shift; cmd_hook "$@"; exit; fi
 if [ "$1" = ls ]; then cmd_ls; exit; fi
 

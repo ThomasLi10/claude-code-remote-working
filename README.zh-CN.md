@@ -21,7 +21,7 @@
   - 如果远端文件在 Claude 上次读取之后被改过（另一个 Claude 会话、格式化工具、`git checkout`、编辑器），上传会被拒绝：镜像重置为远端版本，Claude 的版本另存一份，不会悄悄覆盖任何东西。
 - **每个会话有自己的镜像**：放在内存里（`/dev/shm`），权限私有（`umask 077`），会话结束时删除；如果里面还有没传到远端的修改，就会保留。
 - **远端上下文**：连接时会打印远端的 git 状态和可用工具、所有适用的 `CLAUDE.md`，以及远端安装的 agent skill（目录、所在仓库和远端用户的 `.claude/skills`、`.agents/skills`、`.codex/skills`），可以用 `/rw <target> /<skill>` 运行。
-- **防护**：镜像里只有 Claude 打开过的文件，所以在镜像里用 Grep 和 Glob 会被拦下，Claude 改用远端的 `rg`、`git grep` 或 `find` 搜索。
+- **防护**：镜像里只有 Claude 打开过的文件，所以在镜像里用 Grep 和 Glob 会被拦下，Claude 改用远端的 `rg`、`git grep` 或 `find` 搜索。超过 10 MB 的文件不会整个传输，Claude 会被提示改用远端的 `tail`、`grep` 看局部。会话镜像里还有没传到远端的修改时，Stop hook 会让 Claude 这一轮先不结束，并列出这些文件（只拦一次）。
 
 ## 环境要求
 
@@ -82,6 +82,7 @@ HOST 可以是 ssh 能接受的任何写法。alias 和 ssh 主机同名时，al
 | `RW_SSH_OPTS` | （无） | 额外的 ssh 选项，比如 `-o ProxyJump=bastion`，优先于 rw 的默认选项 |
 | `RW_MIRROR_BASE` | `/dev/shm/claude-remote`；没有 `/dev/shm` 时是 `$TMPDIR/claude-remote-$UID` | 会话镜像的位置 |
 | `RW_MIRROR` | （无） | 使用一个固定的镜像目录，而不是每个会话一个 |
+| `RW_MAX_FILE_MB` | `10` | 超过这个大小（MB）的文件不经镜像整个传输；`0` 表示不限制 |
 
 ## 文件位置
 
@@ -98,7 +99,7 @@ HOST 可以是 ssh 能接受的任何写法。alias 和 ssh 主机同名时，al
 
 - 没有 tty：命令的 stdin 直接是 EOF，请使用非交互参数。服务、watcher 这类需要长期运行的进程放到远端的 `nohup … &` 或 tmux 里。
 - 镜像里只有 Claude 打开过的文件，搜索在远端进行。
-- 每次读写都传输整个文件（经 ssh 的 base64），源代码文件没问题，特别大的文件会慢。
+- 每次读写都传输整个文件（经 ssh 的 base64）：源代码文件没问题，大文件太慢，所以超过 `RW_MAX_FILE_MB` 的文件会被拒绝。
 - 只在两端都是 Linux 的环境下测试过。
 
 ## 仓库结构

@@ -21,7 +21,7 @@ English | [简体中文](README.zh-CN.md)
   - An upload is refused if the remote file changed since Claude last read it (another Claude session, a formatter, `git checkout`, an editor). The mirror is reset to the remote version and Claude's version is saved aside, so nothing is overwritten silently.
 - **Each session has its own mirror**: in memory (`/dev/shm`), private (`umask 077`), and deleted when the session ends unless it holds edits that never reached the remote.
 - **Remote context**: connecting prints the remote's git state and tools, every `CLAUDE.md` that applies there, and the agent skills installed on the remote (`.claude/skills`, `.agents/skills`, `.codex/skills` of the directory, its repo and the remote user), which you run as `/rw <target> /<skill>`.
-- **Guard rails**: Grep and Glob are blocked inside the mirror, which only holds the files Claude opened. Claude searches on the remote with `rg`, `git grep` or `find` instead.
+- **Guard rails**: Grep and Glob are blocked inside the mirror, which only holds the files Claude opened; Claude searches on the remote with `rg`, `git grep` or `find` instead. A file over 10 MB is not moved whole, and Claude is told to look at parts of it with `tail` or `grep` on the remote. While the session's mirror holds edits that never reached the remote, a Stop hook keeps Claude's turn going once and lists them.
 
 ## Requirements
 
@@ -82,6 +82,7 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 | `RW_SSH_OPTS` | (none) | extra ssh options, e.g. `-o ProxyJump=bastion`; they take precedence over rw's defaults |
 | `RW_MIRROR_BASE` | `/dev/shm/claude-remote`, or `$TMPDIR/claude-remote-$UID` without `/dev/shm` | where the session mirrors live |
 | `RW_MIRROR` | (none) | one fixed mirror directory instead of one per session |
+| `RW_MAX_FILE_MB` | `10` | files bigger than this are not moved whole through the mirror; `0` turns the limit off |
 
 ## Where things are
 
@@ -98,7 +99,7 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 
 - There is no tty: commands get EOF on stdin, so use non-interactive flags. Servers and watchers go in `nohup … &` or a tmux session on the remote.
 - The mirror only holds the files Claude has opened; searching happens on the remote.
-- Every read and write moves the whole file (base64 over ssh). That is fine for source files and slow for very large ones.
+- Every read and write moves the whole file (base64 over ssh): fine for source files, too slow for big ones, which is why files over `RW_MAX_FILE_MB` are refused.
 - Tested with Linux on both ends.
 
 ## Repository layout

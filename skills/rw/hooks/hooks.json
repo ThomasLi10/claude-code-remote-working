@@ -12,6 +12,17 @@
         ]
       }
     ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/rw\" hook stop 2>/dev/null || true",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
