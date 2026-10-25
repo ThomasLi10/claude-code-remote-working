@@ -6,46 +6,63 @@ import type { EngineInterface, PromptAutocompleteSuggestion, Register } from 'cl
 //   /rw host:<Tab>      -> the directories in host's home; taking one lists its subdirectories, and so on
 //   /rw api /r<Tab>     -> the agent skills on api's host, as `rw api skills` lists them
 // The dim hint after "/rw " names the aliases, and the status line shows the target rw last worked in.
-// Typing never waits on ssh: skill lists come from the cache `rw` writes on every `info` or `skills` call
-// (a missing or old one is refreshed in the background), and a directory listing joins the typeahead
-// whenever it arrives.
+// Typing never waits long on ssh: skill lists come from the cache `rw` writes on every `info` or `skills`
+// call (a missing or old one is refreshed in the background), and remote directories are listed a level
+// ahead of the one being typed, starting as soon as a host's name is.
 
 const STALE_MS = 10 * 60 * 1000 // refresh a cached skill list in the background after this
-const RETRY_MS = 60 * 1000 // don't retry a failing target sooner than this
+const RETRY_MS = 60 * 1000 // don't retry a failing skill list sooner than this
 const LISTING_MS = 60 * 1000 // keep a remote directory listing, and the ssh hosts, this long
+const UNREACHABLE_MS = 10 * 1000 // don't list a host again this soon after a listing failed
+const WAIT_MS = 8000 // how long a keystroke waits for a listing (the next keystroke abandons the wait)
 
-type Paths = { rw: string; aliases: string; skills: string; recent: string }
+type Paths = { home: string; rw: string; aliases: string; skills: string; recent: string; sshOpts: string[] }
 type Alias = { name: string; target: string }
 type Host = { name: string; address: string }
 type Dir = { name: string; isRepo: boolean }
 type Skill = { name: string; isUserOnly: boolean; description: string }
+type Listing = { at: number; dirs: Promise<Dir[]>; deep: boolean; deepening?: boolean }
 
 let paths: Promise<Paths> | undefined
 const refreshing = new Set<string>()
 const lastTry = new Map<string, number>()
 let sshHosts: { at: number; hosts: Promise<Host[]> } | undefined
-const listings = new Map<string, { at: number; dirs: Promise<Dir[]> }>()
+const listings = new Map<string, Listing>() // by "host\ndir", dir as typed: "~/", "~/code/", "/", "code/"
+const unreachable = new Map<string, number>() // host -> when a listing of it last failed
 let hinted: string | undefined // the alias names the hint after "/rw " was built from
 
 const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
-// The same locations `rw` uses: its aliases file, its skill-list cache and its list of recent targets.
+// Work for the caches runs on a timer, outside the typing dispatch: a keystroke that abandons the
+// dispatch would abort it, and the next keystroke is the one that needs the result.
+function detached<T>($: EngineInterface, work: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    $.clock.after(0, () => void work().then(resolve, reject))
+  })
+}
+
+// The same locations and ssh options `rw` uses: its aliases file, skill-list cache, recent targets.
 function locate($: EngineInterface): Promise<Paths> {
-  paths ??= $.process
-    .run([
-      'sh',
-      '-c',
-      'printf "%s\\n%s\\n%s" "$HOME" "${XDG_CACHE_HOME:-$HOME/.cache}" "${RW_ALIASES:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-rw/aliases}"',
-    ])
+  if (paths) return paths
+  const argv = [
+    'sh',
+    '-c',
+    'printf "%s\\n%s\\n%s\\n%s" "$HOME" "${XDG_CACHE_HOME:-$HOME/.cache}" ' +
+      '"${RW_ALIASES:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-rw/aliases}" "${RW_SSH_OPTS:-}"',
+  ]
+  paths = detached($, () => $.process.run(argv))
     .then(r => {
-      const [home, cache, aliases] = r.stdout.split('\n')
+      const [home = '', cache = '', aliases = '', sshOpts = ''] = r.stdout.split('\n')
       return {
+        home,
         rw: `${home}/.claude/skills/rw/rw`,
-        aliases: aliases ?? '',
+        aliases,
         skills: `${cache}/claude-rw/skills`,
         recent: `${cache}/claude-rw/recent`,
+        sshOpts: sshOpts.split(/\s+/).filter(Boolean),
       }
     })
+  paths.catch(() => (paths = undefined)) // asked again next time
   return paths
 }
 
@@ -100,33 +117,97 @@ function parseSshConfig(text: string): Host[] {
 
 function hosts($: EngineInterface): Promise<Host[]> {
   if (!sshHosts || Date.now() - sshHosts.at > LISTING_MS) {
-    const hosts = $.process.run(['sh', '-c', SSH_CONFIG]).then(r => parseSshConfig(r.stdout), () => [])
+    const hosts = detached($, () => $.process.run(['sh', '-c', SSH_CONFIG])).then(r => parseSshConfig(r.stdout))
     sshHosts = { at: Date.now(), hosts }
+    hosts.catch(() => sshHosts?.hosts === hosts && (sshHosts = undefined))
   }
-  return sshHosts.hosts
+  return sshHosts.hosts.catch(() => [])
 }
 
-// The directories in $p on the remote ("" or "~/..." from the home, relative ones too), git repos marked.
+// The directories in $p ("" or "~/..." from the home, relative ones too), "name<TAB>1" for a git repo;
+// then, for the first 200, their own as "name/sub<TAB>..." and an end line "name/<TAB>x", or
+// "name/<TAB>+" when cut at 300. find streams, so a huge directory costs no more than its first entries.
 const LIST_DIRS = `case $p in "") p=$HOME/ ;; "~/"*) p=$HOME/\${p#"~/"} ;; /*) ;; *) p=$HOME/$p ;; esac
 cd -- "$p" 2>/dev/null || exit 0
 echo __RW_DIRS__
-for e in */ .[!.]*/; do [ -d "$e" ] || continue; g=; [ -e "$e.git" ] && g=1; printf '%s\\t%s\\n' "\${e%/}" "$g"; done | head -n 2000`
+k=0
+find . -mindepth 1 -maxdepth 1 \\( -type d -o -type l \\) 2>/dev/null | head -n 2000 | while IFS= read -r e; do
+  e=\${e#./}; [ -d "$e" ] || continue
+  g=; [ -e "$e/.git" ] && g=1
+  printf '%s\\t%s\\n' "$e" "$g"
+  k=$((k + 1)); [ $k -le 200 ] || continue
+  find "$e/" -mindepth 1 -maxdepth 1 \\( -type d -o -type l \\) 2>/dev/null | head -n 2000 | {
+    n=0 s=x
+    while IFS= read -r f; do
+      f=\${f#"$e/"}; [ -d "$e/$f" ] || continue
+      n=$((n + 1)); [ $n -le 300 ] || { s=+; break; }
+      g=; [ -e "$e/$f/.git" ] && g=1
+      printf '%s/%s\\t%s\\n' "$e" "$f" "$g"
+    done
+    printf '%s/\\t%s\\n' "$e" "$s"
+  }
+done`
 
-// Listed with `rw HOST:/ run`, over the ssh connection rw shares; an unreachable host lists nothing.
-function listDirs($: EngineInterface, p: Paths, host: string, dir: string): Promise<Dir[]> {
+// One round trip over the ssh connection rw shares (its options, no login shell: a listing needs no
+// environment). It answers DIR's directories and caches each one's own, so taking one lists at once.
+function fetchListing($: EngineInterface, p: Paths, host: string, dir: string): Promise<Dir[]> {
+  const argv = ['ssh', ...p.sshOpts, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ControlMaster=auto']
+  argv.push('-o', `ControlPath=${p.home}/.ssh/rw-%C`, '-o', 'ControlPersist=30m', host, 'sh -s')
+  const run = detached($, () => $.process.run(argv, { stdin: `p=${quote(dir)}\n${LIST_DIRS}\n`, timeoutMs: 15_000 }))
+  return run.then(r => {
+    const [, out] = r.stdout.split('__RW_DIRS__\n')
+    if (out === undefined) throw new Error(r.stderr.trim() || `no listing of ${host}:${dir}`)
+    const top: Dir[] = []
+    const below = new Map<string, Dir[]>()
+    const complete = new Set<string>()
+    for (const line of out.split('\n')) {
+      const [path = '', flag] = line.split('\t')
+      const slash = path.indexOf('/')
+      if (!path) continue
+      if (slash < 0) top.push({ name: path, isRepo: flag === '1' })
+      else if (slash === path.length - 1) {
+        if (flag === 'x') complete.add(path.slice(0, -1))
+      } else {
+        const parent = path.slice(0, slash)
+        below.set(parent, [...(below.get(parent) ?? []), { name: path.slice(slash + 1), isRepo: flag === '1' }])
+      }
+    }
+    const byName = (a: Dir, b: Dir) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+    const at = Date.now()
+    for (const name of complete) {
+      const key = `${host}\n${dir}${name}/`
+      if (listings.get(key)?.deep) continue
+      listings.set(key, { at, dirs: Promise.resolve((below.get(name) ?? []).sort(byName)), deep: false })
+    }
+    return top.sort(byName)
+  })
+}
+
+// DIR's listing, two levels deep; a failure is not kept, and leaves the host alone for a few seconds.
+function listDeep($: EngineInterface, p: Paths, host: string, dir: string): Promise<Dir[]> {
   const key = `${host}\n${dir}`
-  const hit = listings.get(key)
-  if (hit && Date.now() - hit.at < LISTING_MS) return hit.dirs
-  const dirs = $.process.run([p.rw, `${host}:/`, 'run', `p=${quote(dir)}\n${LIST_DIRS}`], { timeoutMs: 8_000 }).then(
-    r =>
-      (r.stdout.split('__RW_DIRS__\n')[1] ?? '').split('\n').flatMap(line => {
-        const [name, repo] = line.split('\t')
-        return name ? [{ name, isRepo: repo === '1' }] : []
-      }),
-    () => [],
-  )
-  listings.set(key, { at: Date.now(), dirs })
+  const dirs = fetchListing($, p, host, dir)
+  listings.set(key, { at: Date.now(), dirs, deep: true })
+  dirs.catch(() => {
+    if (listings.get(key)?.dirs === dirs) listings.delete(key)
+    unreachable.set(host, Date.now())
+  })
   return dirs
+}
+
+// DIR's listing from the cache, else from the remote; undefined while the host has just failed. A level
+// that came with its parent's listing has its own children fetched now, to stay a level ahead.
+function listDirs($: EngineInterface, p: Paths, host: string, dir: string): Promise<Dir[]> | undefined {
+  const hit = listings.get(`${host}\n${dir}`)
+  if (hit && Date.now() - hit.at < LISTING_MS) {
+    if (!hit.deep && !hit.deepening) {
+      hit.deepening = true
+      void listDeep($, p, host, dir).catch(() => (hit.deepening = false))
+    }
+    return hit.dirs
+  }
+  if (Date.now() - (unreachable.get(host) ?? 0) < UNREACHABLE_MS) return undefined
+  return listDeep($, p, host, dir)
 }
 
 // Runs `rw <target> skills`, which rewrites the cache file; one at a time per target.
@@ -135,8 +216,7 @@ function refresh($: EngineInterface, p: Paths, target: string) {
   if (refreshing.has(target) || now - (lastTry.get(target) ?? 0) < RETRY_MS) return
   refreshing.add(target)
   lastTry.set(target, now)
-  void $.process
-    .run([p.rw, target, 'skills'], { timeoutMs: 60_000 })
+  void detached($, () => $.process.run([p.rw, target, 'skills'], { timeoutMs: 60_000 }))
     .catch(() => undefined)
     .finally(() => refreshing.delete(target))
 }
@@ -154,7 +234,8 @@ async function skills($: EngineInterface, p: Paths, target: string): Promise<Ski
 }
 
 // The first word after /rw. Taking an alias or a recent target ends it; taking a host writes "host:",
-// which lists the host's directories next.
+// which lists the host's directories next. Once the word names a single host, its home and its root
+// are listed ahead.
 async function targetRows($: EngineInterface, typed: string): Promise<PromptAutocompleteSuggestion[]> {
   const p = await locate($)
   const [named, used, known] = await Promise.all([aliases($, p), recent($, p), hosts($)])
@@ -172,11 +253,10 @@ async function targetRows($: EngineInterface, typed: string): Promise<PromptAuto
   }
   if ('ls'.startsWith(typed)) rows.push({ text: 'ls', description: 'list the aliases and recent targets' })
   const names = new Set(named.map(a => a.name))
-  for (const h of known) {
-    if (!names.has(h.name) && h.name.startsWith(typed)) {
-      rows.push({ text: `${h.name}:`, label: h.name, description: h.address || 'ssh host' })
-    }
-  }
+  const matching = known.filter(h => !names.has(h.name) && h.name.startsWith(typed))
+  for (const h of matching) rows.push({ text: `${h.name}:`, label: h.name, description: h.address || 'ssh host' })
+  const only = typed && (matching.find(h => h.name === typed) ?? (matching.length === 1 ? matching[0] : undefined))
+  if (only) for (const dir of ['~/', '/']) void listDirs($, p, only.name, dir)?.catch(() => undefined)
   return rows
 }
 
@@ -185,8 +265,10 @@ async function dirRows($: EngineInterface, host: string, typed: string): Promise
   const cut = typed.lastIndexOf('/')
   const dir = cut >= 0 ? typed.slice(0, cut + 1) : typed === '' || typed === '~' ? '~/' : ''
   const part = cut >= 0 ? typed.slice(cut + 1) : typed === '~' ? '' : typed
-  const dirs = await listDirs($, await locate($), host, dir)
-  return dirs
+  const listing = listDirs($, await locate($), host, dir)
+  if (!listing) return []
+  const dirs = await Promise.race([listing, $.clock.sleep(WAIT_MS).then(() => undefined)]).catch(() => undefined)
+  return (dirs ?? [])
     .filter(d => d.name.startsWith(part) && (part.startsWith('.') || !d.name.startsWith('.')))
     .slice(0, 200)
     .map(d => ({ text: `${host}:${dir}${d.name}/`, label: `${d.name}/`, ...(d.isRepo ? { description: 'git repo' } : {}) }))
@@ -202,8 +284,16 @@ async function skillRows($: EngineInterface, target: string, typed: string): Pro
 
 async function suggest($: EngineInterface, text: string, start: number, token: string) {
   const before = text.slice(0, start)
-  // the prompt box asks for no word after a bare "/rw ", so "/rw" itself offers every target
+  // the prompt box asks for no word after a bare "/rw ", so "/rw" itself offers every target; it also
+  // lists the home and root of the hosts the aliases and recent targets name, which opens their shared
+  // ssh connections ahead of the listings and commands that follow
   if (token === '/rw' && /^\s*$/.test(before)) {
+    const p = await locate($)
+    const [named, used] = await Promise.all([aliases($, p), recent($, p)])
+    const targets = [...named.map(a => a.target), ...used].filter(t => t.includes(':'))
+    for (const host of [...new Set(targets.map(t => t.slice(0, t.indexOf(':'))))].slice(0, 5)) {
+      for (const dir of ['~/', '/']) void listDirs($, p, host, dir)?.catch(() => undefined)
+    }
     return (await targetRows($, '')).map(r => ({ ...r, text: `/rw ${r.text}`, label: r.label ?? r.text }))
   }
   if (/^\s*\/rw\s+$/.test(before)) {

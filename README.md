@@ -65,7 +65,7 @@ The prompt box completes as you type:
 - Taking a host writes `host:` and lists the directories in its home; taking a directory lists its subdirectories, so you can walk down to the project. Git repos are marked.
 - After `/rw <target> /` it lists the skills installed on that host.
 
-Directory listings go over rw's shared ssh connection and join the list when they arrive, so typing never waits on ssh. The status line under the prompt shows the target rw last worked in.
+Remote directories are listed ahead of you, over rw's shared ssh connection: `/rw` opens the connections of your aliases' hosts and lists their home and root, typing a host's name does the same for it, and each listing brings the next level along, so taking a directory shows its subdirectories at once. On a slow link the first listing of a directory can take a second or two; its rows join the list when they arrive, and Tab takes one from there. The status line under the prompt shows the target rw last worked in.
 
 Claude keeps working on the remote until you switch targets or tell it to stop. To add an alias, ask: "add an rw alias `api` for devbox:/home/alice/code/api".
 
