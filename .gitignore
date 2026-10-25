@@ -1,0 +1,9 @@
+# Your aliases live in ~/.config/claude-rw/aliases, never in the repo
+skills/rw/aliases
+
+# Backups, editor and OS leftovers
+*.bak
+*.bak-*
+*~
+*.swp
+.DS_Store

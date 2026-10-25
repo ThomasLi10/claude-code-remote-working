@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "rw",
+  "version": "0.1.0",
+  "description": "Hooks for the rw skill: answer /rw ls without a model turn, and delete a session's mirror of remote files when the session ends.",
+  "author": {
+    "name": "Thomas",
+    "url": "https://github.com/ThomasLi10"
+  },
+  "homepage": "https://github.com/ThomasLi10/claude-code-remote-working",
+  "repository": "https://github.com/ThomasLi10/claude-code-remote-working",
+  "license": "MIT",
+  "skills": [
+    "./"
+  ]
+}

@@ -1,0 +1,615 @@
+#!/usr/bin/env bash
+# rw — work in a directory on an ssh host as if it were the local working directory.
+#
+#   rw HOST:DIR info                 check the connection; show dir, git state, tools, CLAUDE.md files
+#   rw HOST:DIR run [CMD...]         run CMD (or a bash script read from stdin) in DIR
+#   rw HOST:DIR path [PATH...]       print the local mirror path (no PATH: the mirror of DIR)
+#   rw HOST:DIR pull [-f] PATH...    fetch remote files into the mirror
+#   rw HOST:DIR push [-f] PATH...    upload mirror files; refused if the remote changed since last sync
+#   rw HOST:DIR diff PATH...         diff the current remote file against the mirror copy
+#   rw HOST:DIR status               list mirror files whose edits are not on the remote yet
+#   rw HOST:DIR skills               list the remote's agent skills (name, user-only, description, SKILL.md)
+#   rw ls                            list the aliases
+#   rw hook pre-read|post-write|guard-search|prompt-expansion|session-end   Claude Code hooks (JSON on stdin)
+#
+# PATH is relative to DIR, an absolute remote path, or a local mirror path.
+# Each Claude Code session ($CLAUDE_CODE_SESSION_ID) has its own mirror: remote file HOST:/a/b.py is at
+# $BASE/SESSION/HOST/a/b.py, with $BASE = /dev/shm/claude-remote (memory) unless $RW_MIRROR_BASE is set.
+# "rw hook session-end" deletes a session's mirror. $RW_MIRROR forces one fixed mirror dir instead.
+# Extra ssh options can be given in $RW_SSH_OPTS (they take precedence over the defaults).
+# HOST:DIR can also be a bare HOST (its home dir, resolved by info) or a NAME from $RW_ALIASES
+# (default: ${XDG_CONFIG_HOME:-~/.config}/claude-rw/aliases, one "NAME HOST:DIR" per line).
+
+set -uo pipefail
+umask 077  # mirrors hold remote code; keep them private
+
+# Sessions never share a mirror, so the remote is the only state they share: an edit based on a stale
+# read is refused by the upload check instead of racing another session's sync bookkeeping.
+SID=${CLAUDE_CODE_SESSION_ID:-shared}; SID=${SID//[^A-Za-z0-9_-]/_}
+if [ -n "${RW_MIRROR_BASE:-}" ]; then BASE=${RW_MIRROR_BASE%/}
+elif [ -d /dev/shm ] && [ -w /dev/shm ]; then BASE=/dev/shm/claude-remote
+else BASE=${TMPDIR:-/tmp}/claude-remote-$(id -u)
+fi
+LEGACY=$HOME/.cache/claude-remote  # the old shared mirror; still recognized so older sessions keep working
+set_root() { ROOT=${1%/}; META=$ROOT/.meta; CONFLICTS=$ROOT/.conflicts; }
+if [ -n "${RW_MIRROR:-}" ]; then set_root "$RW_MIRROR"; else set_root "$BASE/$SID"; fi
+ALIASES=${RW_ALIASES:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-rw/aliases}
+
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4
+          -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/rw-%C" -o ControlPersist=30m)
+# shellcheck disable=SC2206  # word splitting is intended
+[ -n "${RW_SSH_OPTS:-}" ] && SSH_OPTS=($RW_SSH_OPTS "${SSH_OPTS[@]}")
+
+die() { echo "rw: $*" >&2; exit 1; }
+q() { printf '%q' "$1"; }
+tilde() { case $1 in "$HOME"|"$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+
+TMPD=
+init_tmpd() {  # call in the main shell (not inside $(...)) so the EXIT trap cleans it up
+  mkdir -p "$ROOT" && TMPD=$(mktemp -d "$ROOT/.tmp.XXXXXX") || die "cannot create a temp dir under $ROOT"
+  trap 'rm -rf "$TMPD"' EXIT
+}
+tmpfile() { mktemp "$TMPD/f.XXXXXX"; }
+
+sha_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi
+}
+hash_file() { if [ -f "$1" ]; then sha_stdin < "$1"; else echo ABSENT; fi; }
+
+normpath() {  # lexically normalize an absolute path
+  local IFS=/ part out=()
+  read -ra parts <<< "$1"
+  for part in "${parts[@]}"; do
+    case $part in
+      ''|.) ;;
+      ..) [ ${#out[@]} -gt 0 ] && unset "out[$((${#out[@]} - 1))]" ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  echo "/${out[*]}"
+}
+
+alias_of() {  # alias_of NAME -> its HOST:DIR from $ALIASES; fails if there is none
+  [ -f "$ALIASES" ] || return 1
+  awk -v n="$1" '{ sub(/#.*/, "") } $1 == n && NF >= 2 { print $2; found = 1; exit } END { exit !found }' "$ALIASES"
+}
+
+cmd_ls() {  # cmd_ls -> every "NAME  HOST:DIR" in $ALIASES, names padded to one width
+  [ -f "$ALIASES" ] || { echo "rw: no aliases ($ALIASES does not exist)"; return 0; }
+  awk '{ sub(/#.*/, "") } NF >= 2 { n[++k] = $1; t[k] = $2; if (length($1) > w) w = length($1) }
+    END { if (!k) print "rw: no aliases in " FILENAME; for (i = 1; i <= k; i++) printf "%-" w "s  %s\n", n[i], t[i] }' "$ALIASES"
+}
+
+root_of() {  # root_of PATH -> the mirror root PATH is in: a session's under $BASE, $ROOT or the legacy one
+  local p=$1 r
+  if [[ $p = "$BASE"/[!.]* ]]; then r=${p#"$BASE"/}; echo "$BASE/${r%%/*}"; return 0; fi
+  for r in "$ROOT" "$LEGACY"; do
+    if [ "$p" = "$r" ] || [[ $p = "$r"/* ]]; then echo "$r"; return 0; fi
+  done
+  return 1
+}
+
+mirror_of() { echo "$ROOT/$1$2"; }
+meta_of() { echo "$META/$(printf '%s:%s' "$1" "$2" | sha_stdin)"; }
+base_get() { local m; m=$(meta_of "$1" "$2"); if [ -f "$m" ]; then head -n1 "$m"; else echo ABSENT; fi; }
+base_set() { mkdir -p "$META" && printf '%s\n%s:%s\n' "$3" "$1" "$2" > "$(meta_of "$1" "$2")"; }
+
+backup() {  # backup HOST PATH LOCALFILE -> prints where the local copy was saved
+  local dest
+  dest=$CONFLICTS/$1$2.$(date +%Y%m%d-%H%M%S)
+  mkdir -p "$(dirname "$dest")" && cp -p "$3" "$dest" && echo "$dest"
+}
+
+# resolve ARG -> RH (host), RP (normalized absolute remote path); a mirror path also selects its mirror root
+resolve() {
+  local a=$1 rest r
+  if r=$(root_of "$a") && [[ $a = "$r"/* ]]; then
+    set_root "$r"; rest=${a#"$ROOT"/}; RH=${rest%%/*}
+    if [ "$rest" = "$RH" ]; then RP=/; else RP=/${rest#*/}; fi
+  else
+    case $a in
+      /*) RH=$HOST; RP=$a ;;
+      *) RH=$HOST; RP=$DIR/$a ;;
+    esac
+  fi
+  RP=$(normpath "$RP")
+}
+
+RSSH_ERR=
+rssh() {  # rssh HOST OUTFILE REMOTE_CMD... ; remote script on stdin
+  local host=$1 out=$2; shift 2
+  local err; err=$(tmpfile)
+  ssh "${SSH_OPTS[@]}" "$host" "$@" > "$out" 2> "$err"
+  local rc=$?
+  RSSH_ERR=$(tail -n 5 "$err")
+  return $rc
+}
+
+REMOTE_LIB='rw_h() {
+  if [ -d "$1" ]; then echo DIR
+  elif [ ! -e "$1" ]; then echo ABSENT
+  elif [ ! -r "$1" ]; then echo UNREADABLE
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum < "$1" | cut -c1-64
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 < "$1" | cut -c1-64
+  else openssl dgst -sha256 -r < "$1" | cut -c1-64
+  fi
+}'
+
+# ssh commands never run the interactive part of the remote shell startup (~/.bashrc past its
+# "[ -z "$PS1" ] && return" guard: PATH, conda, PYTHONPATH, proxies...). rw_env saves the variables that
+# part adds to a file on the remote, refreshed when a startup file changes, and loads it before each
+# command, so commands see the user's own environment. Values stay on the remote.
+IFS= read -r -d '' REMOTE_ENV <<'EOS'
+rw_envf=${XDG_CACHE_HOME:-$HOME/.cache}/rw/env.sh
+rw_env_dump() { local v; for v in $(compgen -e); do printf 'export %s=%q\n' "$v" "${!v}"; done; }
+rw_env_refresh() {
+  local base inter tmp to=
+  command -v timeout >/dev/null 2>&1 && to="timeout 60"
+  mkdir -p "$(dirname "$rw_envf")" || return 1
+  base=$(bash -lc "$(declare -f rw_env_dump); rw_env_dump" </dev/null 2>/dev/null)
+  inter=$($to bash -lic "$(declare -f rw_env_dump); rw_env_dump >&3; unset HISTFILE" 3>&1 >/dev/null 2>&1 </dev/null)
+  [ -n "$inter" ] || return 1
+  tmp=$(mktemp "$rw_envf.XXXXXX") || return 1
+  { echo "# written by rw: variables added by the interactive shell startup, $(date '+%F %T')"
+    grep -vxF -f <(printf '%s\n' "$base") <<< "$inter" |
+      grep -vE '^export (_|SHLVL|PWD|OLDPWD|SSH_[A-Za-z_]*|TERM|TMUX[A-Za-z_]*|PS[0-9]|PROMPT_COMMAND|HIST[A-Za-z_]*|LINES|COLUMNS|DISPLAY|XDG_SESSION_[A-Za-z_]*)='
+  } > "$tmp" && mv -f "$tmp" "$rw_envf"
+}
+rw_env() {  # rw_env [force]: refresh the saved environment if forced, missing or stale; then load it
+  local f stale=${1:-}
+  [ -f "$rw_envf" ] || stale=1
+  for f in ~/.bashrc ~/.bash_profile ~/.bash_login ~/.profile; do [ "$f" -nt "$rw_envf" ] && stale=1; done
+  [ -z "$stale" ] || rw_env_refresh || echo "rw: could not capture the interactive shell environment on $(hostname)" >&2
+  [ ! -f "$rw_envf" ] || . "$rw_envf"
+}
+EOS
+
+status_of() { sed -n 's/^__RW_STATUS__ //p' "$1" | head -n1; }
+
+# Agent skills on the remote: those of the working dir and its repo, then the remote user's, each once.
+# One "__RW_SKILL__<TAB>name<TAB>1 if user-invoked only<TAB>description<TAB>SKILL.md" line per skill.
+IFS= read -r -d '' REMOTE_SKILLS <<'EOS'
+rw_seen= rw_nskills=0
+for rw_root in "$(pwd)" "$(git rev-parse --show-toplevel 2>/dev/null)" "$HOME"; do
+  [ -n "$rw_root" ] || continue
+  for rw_f in "$rw_root"/.claude/skills/*/SKILL.md "$rw_root"/.agents/skills/*/SKILL.md "$rw_root"/.codex/skills/*/SKILL.md; do
+    [ -f "$rw_f" ] || continue
+    rw_real=$(readlink -f -- "$rw_f")
+    case " $rw_seen " in *" $rw_real "*) continue ;; esac
+    rw_seen="$rw_seen $rw_real"
+    awk -v path="$rw_f" 'NR == 1 && $0 != "---" { exit } NR > 1 && $0 == "---" { exit }
+      more && /^[ \t]/ { sub(/^[ \t]+/, ""); d = d (d == "" ? "" : " ") $0; next }
+      { more = 0 }
+      /^name:/ { sub(/^name:[ \t]*/, ""); n = $0 }
+      /^description:/ { sub(/^description:[ \t]*/, ""); gsub(/^"|"$/, ""); d = $0
+        if (d ~ /^[>|][-+]?$/ || d == "") { d = ""; more = 1 } }
+      /^disable-model-invocation:[ \t]*true/ { u = 1 }
+      END { gsub(/\t/, " ", d); if (length(d) > 160) d = substr(d, 1, 160) "…"
+        if (n != "") printf "__RW_SKILL__\t%s\t%s\t%s\t%s\n", n, u, d, path }' "$rw_f" && rw_nskills=$((rw_nskills + 1))
+  done
+done
+[ "$rw_nskills" -gt 0 ] || echo "(none)"
+EOS
+
+# The skill list of each target as the user typed it, for the prompt box's completion (rw-complete mod).
+SKILL_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/claude-rw/skills
+save_skills() {  # save_skills OUTFILE: its __RW_SKILL__ lines -> the cache file of the target as typed
+  local f tmp
+  mkdir -p "$SKILL_CACHE" || return 0
+  f=$SKILL_CACHE/${ARG0//[^A-Za-z0-9._-]/_}.tsv
+  tmp=$(mktemp "$f.XXXXXX") || return 0
+  sed -n 's/^__RW_SKILL__\t//p' "$1" > "$tmp" && mv -f "$tmp" "$f"
+}
+
+# fetch HOST PATH OUTFILE -> prints ok|absent|dir|notfile|unreadable|error:<msg>
+fetch() {
+  local raw st
+  raw=$(tmpfile)
+  {
+    printf 'f=%s\n' "$(q "$2")"
+    cat <<'EOS'
+if [ -d "$f" ]; then echo "__RW_STATUS__ dir"
+elif [ ! -e "$f" ]; then echo "__RW_STATUS__ absent"
+elif [ ! -f "$f" ]; then echo "__RW_STATUS__ notfile"
+elif [ ! -r "$f" ]; then echo "__RW_STATUS__ unreadable"
+else echo "__RW_STATUS__ ok"; echo "__RW_BEGIN__"; base64 < "$f" && echo "__RW_END__"
+fi
+EOS
+  } | rssh "$1" "$raw" bash -s || { echo "error:ssh to $1 failed: $RSSH_ERR"; return; }
+  st=$(status_of "$raw")
+  case $st in
+    ok)
+      grep -qx '__RW_END__' "$raw" || { echo "error:truncated transfer"; return; }
+      sed -n '/^__RW_BEGIN__$/,/^__RW_END__$/{/^__RW_/d;p;}' "$raw" | base64 -d > "$3" \
+        || { echo "error:cannot decode transfer"; return; }
+      echo ok ;;
+    absent|dir|notfile|unreadable) echo "$st" ;;
+    *) echo "error:unexpected reply from $1" ;;
+  esac
+}
+
+# upload HOST PATH LOCALFILE EXPECTED_REMOTE_HASH(or ANY) -> prints ok <hash>|conflict <hash>|dir|error <msg>
+upload() {
+  local raw want st
+  raw=$(tmpfile); want=$(hash_file "$3")
+  {
+    printf '%s\n' "$REMOTE_LIB"
+    printf 'f=%s; base=%s; want=%s\n' "$(q "$2")" "$4" "$want"
+    cat <<'EOS'
+cur=$(rw_h "$f")
+if [ "$cur" = DIR ]; then echo "__RW_STATUS__ dir"; exit 0; fi
+if [ "$base" != ANY ] && [ "$cur" != "$base" ]; then echo "__RW_STATUS__ conflict $cur"; exit 0; fi
+mkdir -p -- "$(dirname -- "$f")" || { echo "__RW_STATUS__ error cannot create parent directory"; exit 0; }
+tmp=$(mktemp) || { echo "__RW_STATUS__ error mktemp failed"; exit 0; }
+base64 -d > "$tmp" <<'__RW_B64__'
+EOS
+    base64 < "$3"
+    cat <<'EOS'
+__RW_B64__
+got=$(rw_h "$tmp")
+if [ "$got" != "$want" ]; then rm -f "$tmp"; echo "__RW_STATUS__ error upload corrupted in transit"; exit 0; fi
+if cat "$tmp" > "$f"; then rm -f "$tmp"; echo "__RW_STATUS__ ok $(rw_h "$f")"
+else rm -f "$tmp"; echo "__RW_STATUS__ error cannot write $f"; fi
+EOS
+  } | rssh "$1" "$raw" bash -s || { echo "error ssh to $1 failed: $RSSH_ERR"; return; }
+  st=$(status_of "$raw")
+  [ -n "$st" ] || st="error unexpected reply from $1"
+  echo "$st"
+}
+
+# sync_down HOST PATH FORCE: make the mirror match the remote.
+# returns 0 ok, 1 error, 2 conflict (local edits saved to $SAVED), 3 kept unpushed local edits, 4 not a file
+MSG= SAVED=
+sync_down() {
+  local h=$1 p=$2 force=$3 m L B R st tmp rc=0
+  m=$(mirror_of "$h" "$p"); L=$(hash_file "$m"); B=$(base_get "$h" "$p")
+  tmp=$(tmpfile)
+  st=$(fetch "$h" "$p" "$tmp")
+  case $st in
+    ok) R=$(hash_file "$tmp") ;;
+    absent) R=ABSENT ;;
+    dir) MSG="$h:$p is a directory on the remote"; return 4 ;;
+    notfile) MSG="$h:$p is not a regular file on the remote"; return 4 ;;
+    unreadable) MSG="$h:$p is not readable on the remote"; return 1 ;;
+    *) MSG="cannot fetch $h:$p: ${st#error:}"; return 1 ;;
+  esac
+  if [ "$force" != 1 ] && [ "$L" != "$B" ] && [ "$L" != "$R" ]; then
+    if [ "$R" = "$B" ]; then MSG="kept unpushed local edits in $m"; return 3; fi
+    SAVED=$(backup "$h" "$p" "$m"); rc=2
+    MSG="$h:$p changed on the remote while the mirror had unpushed edits; mirror reset to the remote version, your edits saved at $SAVED"
+  fi
+  if [ "$R" = ABSENT ]; then
+    rm -f "$m"
+  elif [ "$L" != "$R" ]; then
+    mkdir -p "$(dirname "$m")" && cp "$tmp" "$m" || { MSG="cannot write $m"; return 1; }
+  fi
+  base_set "$h" "$p" "$R"
+  return $rc
+}
+
+# sync_up HOST PATH FORCE: upload the mirror copy.
+# returns 0 ok, 1 error, 2 conflict (remote changed; mirror reset to it, edits saved to $SAVED)
+sync_up() {
+  local h=$1 p=$2 force=$3 m L B st cur
+  m=$(mirror_of "$h" "$p")
+  [ -f "$m" ] || { MSG="no mirror copy at $m"; return 1; }
+  L=$(hash_file "$m"); B=$(base_get "$h" "$p")
+  if [ "$L" = "$B" ] && [ "$force" != 1 ]; then MSG="$h:$p already up to date"; return 0; fi
+  [ "$force" = 1 ] && B=ANY
+  st=$(upload "$h" "$p" "$m" "$B")
+  case $st in
+    "ok "*) base_set "$h" "$p" "${st#ok }"; MSG="synced $h:$p"; return 0 ;;
+    "conflict "*)
+      cur=${st#conflict }
+      SAVED=$(backup "$h" "$p" "$m")
+      sync_down "$h" "$p" 1 >/dev/null
+      if [ "$cur" = ABSENT ]; then
+        MSG="$h:$p was deleted on the remote since you last read it"
+      elif [ "$B" = ABSENT ]; then
+        MSG="$h:$p already exists on the remote and you had not read it"
+      else
+        MSG="$h:$p changed on the remote since you last read it (another Claude session, formatter, git checkout, another editor...)"
+      fi
+      MSG="$MSG. Your version was NOT uploaded; it is saved at $SAVED. The mirror now holds the current remote content"
+      return 2 ;;
+    dir) MSG="$h:$p is a directory on the remote"; return 1 ;;
+    *) MSG="upload of $h:$p failed: ${st#error }"; return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_info() {
+  local out rc
+  out=$(tmpfile)
+  {
+    printf 'd=%s\n%s\nrw_env force\n' "$(q "$DIR")" "$REMOTE_ENV"
+    cat <<'EOS'
+case $d in "~") d=$HOME ;; "~/"*) d=$HOME/${d#"~/"} ;; /*) ;; *) d=$HOME/$d ;; esac
+echo "__RW_STATUS__ ok"
+echo "host:   $(whoami)@$(hostname) ($(uname -sm)), login shell $SHELL"
+if ! cd -- "$d" 2>/dev/null; then echo "ERROR: directory not found on remote: $d"; exit 3; fi
+echo "__RW_DIR__ $(pwd)"
+if [ -s "$rw_envf" ]; then
+  echo "env:    loaded before every command (from the interactive shell startup, saved in $rw_envf):"
+  echo "        $(sed -n 's/^export \([^=]*\)=.*/\1/p' "$rw_envf" | tr '\n' ' ')"
+else
+  echo "env:    WARNING: the interactive shell environment could not be captured; commands get the plain login environment"
+fi
+echo "PATH:   $PATH"
+printf 'tools: '
+for t in git rg python3 python uv pip node npm pnpm yarn go cargo make cmake docker tmux; do
+  command -v "$t" >/dev/null 2>&1 && printf '%s ' "$t"
+done
+echo
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo
+  echo "== git: root $(git rev-parse --show-toplevel), branch $(git branch --show-current 2>/dev/null || echo '?')"
+  git --no-pager status --short | head -n 20
+  echo "-- recent commits"
+  git --no-pager log --oneline -n 5 2>/dev/null
+fi
+echo
+echo "== ls"
+ls -A | head -n 60
+echo
+echo "== skills (/name, description, SKILL.md)"
+EOS
+    printf '%s\n' "$REMOTE_SKILLS"
+    cat <<'EOS'
+shown=
+show() { case " $shown " in *" $1 "*) return ;; esac; shown="$shown $1"; echo; echo "== $1"; head -n 300 -- "$1"; [ "$(wc -l < "$1")" -gt 300 ] && echo "... (truncated; read the rest via the mirror)"; }
+dir=$(pwd)
+while :; do
+  for f in CLAUDE.md CLAUDE.local.md .claude/CLAUDE.md; do [ -f "$dir/$f" ] && show "$dir/$f"; done
+  [ "$dir" = / ] && break
+  dir=$(dirname "$dir")
+done
+[ -f AGENTS.md ] && [ ! -f CLAUDE.md ] && show "$(pwd)/AGENTS.md"
+[ -f "$HOME/.claude/CLAUDE.md" ] && show "$HOME/.claude/CLAUDE.md"
+exit 0
+EOS
+  } | rssh "$HOST" "$out" bash -l -s
+  rc=$?
+  if [ -z "$(status_of "$out")" ]; then
+    echo "rw: cannot reach $HOST over ssh (exit $rc): $RSSH_ERR" >&2
+    echo "rw: ssh runs with BatchMode=yes (no prompts). Have the user run '! ssh $HOST true' once to accept the host key / unlock the key, then retry." >&2
+    [ "$BARE" = 1 ] && echo "rw: '$HOST' was taken as a bare ssh host because $ALIASES has no alias of that name; check for a typo." >&2
+    return 1
+  fi
+  local rdir; rdir=$(sed -n 's/^__RW_DIR__ //p' "$out")
+  awk -F'\t' 'f && $1 == "__RW_SKILL__" { printf "/%s%s — %s\n    %s\n", $2, ($3 ? " [user-invoked only]" : ""), $4, $5; next }
+    f && !/^__RW_DIR__ /; /^__RW_STATUS__ /{f=1}' "$out"
+  [ -n "$rdir" ] || return 1
+  save_skills "$out"
+  echo
+  echo "== rw"
+  echo "target: $HOST:$rdir"
+  echo "mirror: $(mirror_of "$HOST" "$rdir")"
+}
+
+cmd_skills() {  # cmd_skills -> "name<TAB>1 if user-invoked only<TAB>description<TAB>SKILL.md" per skill; refreshes the cache
+  local out
+  out=$(tmpfile)
+  {
+    printf 'd=%s\n' "$(q "$DIR")"
+    cat <<'EOS'
+case $d in "~") d=$HOME ;; "~/"*) d=$HOME/${d#"~/"} ;; /*) ;; *) d=$HOME/$d ;; esac
+cd -- "$d" 2>/dev/null || { echo "__RW_STATUS__ nodir"; exit 3; }
+echo "__RW_STATUS__ ok"
+EOS
+    printf '%s\n' "$REMOTE_SKILLS"
+  } | rssh "$HOST" "$out" bash -l -s
+  case $(status_of "$out") in
+    ok) ;;
+    nodir) die "directory not found on $HOST: $DIR" ;;
+    *) die "cannot reach $HOST over ssh: $RSSH_ERR" ;;
+  esac
+  save_skills "$out"
+  sed -n 's/^__RW_SKILL__\t//p' "$out"
+}
+
+cmd_run() {
+  local script rc
+  if [ $# -gt 0 ]; then script="$*"; else script=$(cat); fi
+  [ -n "${script//[[:space:]]/}" ] || die "run: no command (pass it as arguments or on stdin)"
+  {
+    printf '%s\nrw_env\n' "$REMOTE_ENV"
+    printf 'cd -- %s 2>/dev/null || { echo rw: remote directory not found: %s >&2; exit 97; }\n' "$(q "$DIR")" "$(q "$DIR")"
+    printf '%s\n' "__rw_s=\$(base64 -d <<'__RW_B64__'"
+    printf '%s\n' "$script" | base64
+    printf '%s\n' '__RW_B64__' ')' 'exec bash -c "$__rw_s" bash </dev/null'
+  } | ssh "${SSH_OPTS[@]}" "$HOST" bash -l -s
+  rc=$?
+  [ $rc -eq 255 ] && echo "rw: ssh to $HOST failed (exit 255)" >&2
+  return $rc
+}
+
+cmd_path() {
+  if [ $# -eq 0 ]; then mirror_of "$HOST" "$DIR"; return; fi
+  local a; for a in "$@"; do resolve "$a"; mirror_of "$RH" "$RP"; done
+}
+
+cmd_pull() {
+  local force=0 a rc=0; [ "${1:-}" = -f ] && { force=1; shift; }
+  [ $# -gt 0 ] || die "pull: no path given"
+  for a in "$@"; do
+    resolve "$a"
+    sync_down "$RH" "$RP" "$force"
+    case $? in
+      0) if [ -f "$(mirror_of "$RH" "$RP")" ]; then mirror_of "$RH" "$RP"; else echo "rw: $RH:$RP does not exist on the remote" >&2; fi ;;
+      3) echo "rw: $MSG (push them, or pull -f to discard)" >&2; rc=1 ;;
+      *) echo "rw: $MSG" >&2; rc=1 ;;
+    esac
+  done
+  return $rc
+}
+
+cmd_push() {
+  local force=0 a rc=0; [ "${1:-}" = -f ] && { force=1; shift; }
+  [ $# -gt 0 ] || die "push: no path given"
+  for a in "$@"; do
+    resolve "$a"
+    if sync_up "$RH" "$RP" "$force"; then echo "rw: $MSG"; else echo "rw: $MSG" >&2; rc=1; fi
+  done
+  return $rc
+}
+
+cmd_diff() {
+  local a tmp st m
+  [ $# -gt 0 ] || die "diff: no path given"
+  for a in "$@"; do
+    resolve "$a"; m=$(mirror_of "$RH" "$RP"); tmp=$(tmpfile)
+    st=$(fetch "$RH" "$RP" "$tmp")
+    case $st in ok) ;; absent) : > "$tmp" ;; *) echo "rw: cannot fetch $RH:$RP: $st" >&2; continue ;; esac
+    [ -f "$m" ] || m=/dev/null
+    diff -u --label "remote $RH:$RP" --label "mirror $m" "$tmp" "$m" && echo "rw: $RH:$RP: mirror matches remote"
+  done
+  return 0
+}
+
+cmd_status() {
+  local top f p n=0
+  top=$(mirror_of "$HOST" "$DIR")
+  [ -d "$top" ] || { echo "rw: no mirror files for $HOST:$DIR yet"; return 0; }
+  while IFS= read -r -d '' f; do
+    p=${f#"$ROOT/$HOST"}
+    if [ "$(hash_file "$f")" != "$(base_get "$HOST" "$p")" ]; then echo "unpushed: $f"; n=$((n + 1)); fi
+  done < <(find "$top" -type f -print0)
+  [ $n -eq 0 ] && echo "rw: all mirror files under $top are in sync with the remote as last seen"
+  return 0
+}
+
+# ---------------------------------------------------------------- hooks
+
+json_str() {  # json_str KEY JSON -> first string value of "KEY" (plain values only; enough for paths)
+  printf '%s' "$2" | command grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"\\\\]*\"" | head -n1 | sed 's/^.*:[[:space:]]*"//; s/"$//'
+}
+
+json_esc() {  # json_esc TEXT -> TEXT escaped for use inside a JSON string
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\t'/\\t}; s=${s//$'\r'/}; s=${s//$'\n'/\\n}
+  printf '%s' "$s"
+}
+
+in_mirror() {  # in_mirror PATH -> true if PATH is a mirrored remote file (in any session's mirror)
+  local r rest
+  r=$(root_of "$1") && [[ $1 = "$r"/* ]] || return 1
+  rest=${1#"$r"/}
+  case $rest in
+    .*) return 1 ;;  # .meta, .conflicts, .tmp.*
+    ?*/?*) return 0 ;;
+  esac
+  return 1
+}
+
+has_unpushed() {  # has_unpushed ROOT -> true if a mirror file under ROOT differs from the remote as last seen
+  local f rest
+  set_root "$1"
+  while IFS= read -r -d '' f; do
+    rest=${f#"$ROOT"/}
+    [ "$(hash_file "$f")" != "$(base_get "${rest%%/*}" "/${rest#*/}")" ] && return 0
+  done < <(find "$ROOT" -mindepth 2 -type f ! -path "$ROOT/.*" -print0)
+  return 1
+}
+
+cmd_hook() {
+  local input fp rc r sid d a
+  input=$(cat)
+  case ${1:-} in
+    pre-read)
+      fp=$(json_str file_path "$input")
+      in_mirror "$fp" || return 0
+      resolve "$fp"; init_tmpd
+      sync_down "$RH" "$RP" 0; rc=$?
+      case $rc in
+        0|3) return 0 ;;
+        2) echo "rw: $MSG. Read the file again; re-apply your edits if they are still wanted." >&2 ;;
+        4) echo "rw: $MSG — list it with: rw $RH:<dir> run 'ls -la $(q "$RP")'" >&2 ;;
+        *) echo "rw: $MSG" >&2 ;;
+      esac
+      return 2 ;;
+    post-write)
+      fp=$(json_str file_path "$input"); [ -n "$fp" ] || fp=$(json_str notebook_path "$input")
+      in_mirror "$fp" || return 0
+      resolve "$fp"; init_tmpd
+      if sync_up "$RH" "$RP" 0; then
+        printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"rw: synced to %s:%s"}}\n' "$RH" "$RP"
+        return 0
+      fi
+      if [ -n "$SAVED" ]; then
+        echo "rw: NOT SYNCED — $MSG. Read the file again and redo the edit." >&2
+      else
+        echo "rw: NOT SYNCED — $MSG. The edit exists only in the mirror ($fp); once the problem is fixed run: rw $RH:<dir> push $(q "$fp")" >&2
+      fi
+      return 2 ;;
+    guard-search)
+      fp=$(json_str path "$input"); fp=${fp%/}
+      if [ "$fp" != "$BASE" ]; then
+        r=$(root_of "$fp") || return 0
+        case ${fp#"$r"} in /.*) return 0 ;; esac
+      fi
+      echo "rw: the mirror only holds files you have opened, so searching it is misleading. Search on the remote instead, e.g. rw HOST:DIR run 'rg -n PATTERN' (or git grep -n / git ls-files / find)." >&2
+      return 2 ;;
+    prompt-expansion)  # "/rw ls" or a bare "/rw": show the aliases at once instead of starting a model turn
+      [ "$(json_str command_name "$input")" = rw ] || return 0
+      read -r a <<< "$(json_str command_args "$input")"
+      case $a in
+        ls) r=$(cmd_ls) ;;
+        '')  # no arguments, or ones json_str can't read (quotes, escapes): only the first is a bare /rw
+          printf '%s' "$input" | command grep -q '"command_args"[[:space:]]*:[[:space:]]*"[^"]' && return 0
+          r="$(cmd_ls)"$'\n'"usage: /rw NAME|HOST[:DIR] [task | /remote-skill]" ;;
+        *) return 0 ;;
+      esac
+      [ -f "$ALIASES" ] && r="$r"$'\n'"($(tilde "$ALIASES"))"
+      # a block shows the text and ends the prompt there: no model call, and nothing is added to the context
+      printf '{"decision":"block","reason":"%s","hookSpecificOutput":{"hookEventName":"UserPromptExpansion","suppressOriginalPrompt":true}}\n' \
+        "$(json_esc "$r")"
+      return 0 ;;
+    session-end)
+      sid=$(json_str session_id "$input"); sid=${sid//[^A-Za-z0-9_-]/_}
+      # keep a mirror holding edits that never reached the remote; it is in memory, so a reboot clears it
+      if [ -n "$sid" ] && [ -d "$BASE/$sid" ] && ! has_unpushed "$BASE/$sid"; then rm -rf -- "${BASE:?}/$sid"; fi
+      # sessions that ended without this hook (killed, crashed) leave their mirror behind; drop ones idle a week
+      for d in "$BASE"/*/; do
+        d=${d%/}
+        [ -d "$d" ] && [ -z "$(find "$d" -mmin -10080 -print -quit)" ] && rm -rf -- "$d"
+      done
+      return 0 ;;
+    *) die "unknown hook: ${1:-}" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- main
+
+[ $# -ge 1 ] || { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+if [ "$1" = hook ]; then shift; cmd_hook "$@"; exit; fi
+if [ "$1" = ls ]; then cmd_ls; exit; fi
+
+ARG0=$1  # the target as typed (alias, HOST or HOST:DIR): the key of its skill cache
+BARE=0
+case $1 in
+  *:*) target=$1 ;;
+  *) target=$(alias_of "$1") || { target="$1:~"; BARE=1; } ;;  # an alias, else a bare HOST = its home dir
+esac
+case $target in *:*) ;; *) die "alias '$1' in $ALIASES must be HOST:DIR, got '$target'" ;; esac
+HOST=${target%%:*}; DIR=${target#*:}
+shift
+[ -n "$HOST" ] && [ -n "$DIR" ] || die "first argument must be HOST:DIR, HOST or an alias, e.g. devbox:/home/alice/code/api"
+sub=${1:-}; [ $# -gt 0 ] && shift
+if [ "$sub" != info ] && [ "$sub" != skills ]; then
+  case $DIR in /*) DIR=$(normpath "$DIR") ;; *) die "DIR must be absolute (run: rw $HOST:$DIR info to resolve it)" ;; esac
+fi
+
+init_tmpd
+case $sub in
+  info) cmd_info "$@" ;;
+  run) cmd_run "$@" ;;
+  path) cmd_path "$@" ;;
+  pull) cmd_pull "$@" ;;
+  push) cmd_push "$@" ;;
+  diff) cmd_diff "$@" ;;
+  status) cmd_status "$@" ;;
+  skills) cmd_skills ;;
+  *) die "unknown command '$sub' (info|run|path|pull|push|diff|status|skills)" ;;
+esac

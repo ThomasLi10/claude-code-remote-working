@@ -1,0 +1,12 @@
+# rw aliases: one per line, "NAME  HOST:DIR". Everything after a # is a comment.
+#
+#   /rw api   is then the same as   /rw devbox:/home/alice/code/api
+#
+# HOST is anything ssh accepts: a Host from ~/.ssh/config, user@host, ...
+# DIR is an absolute path, or ~ or ~/path for the remote home. It can't contain spaces.
+# An alias wins over an ssh host of the same name, so don't reuse the Host names in ~/.ssh/config.
+# Remove the "# " in front of a line below to use it.
+
+# api   devbox:/home/alice/code/api
+# web   devbox:~/code/web
+# gpu   alice@gpu.example.com:/data/train
