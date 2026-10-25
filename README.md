@@ -42,6 +42,8 @@ git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/cl
 
 The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude Code loads from the skills folder by itself. Its hooks complete hosts, remote directories, aliases and remote skills after `/rw`, show the current target in the status line, answer `/rw ls` without a model call, keep a turn from ending with unpushed edits, and clean up mirrors at session end, so there is nothing to add to `settings.json`.
 
+**Check:** `~/.claude/skills/rw/rw doctor <host or alias>` checks the local setup, then whether ssh logs in without prompts, the tools on the remote, the captured shell environment and the directory, and says what to fix.
+
 **Update:** `git -C ~/code/claude-code-remote-working pull`. Because of the link, the new version is live at once; hook changes apply in the next session or after `/reload-plugins`.
 
 **Uninstall:** `~/code/claude-code-remote-working/install.sh --uninstall` removes the link and keeps your aliases.
@@ -117,7 +119,7 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 ```text
 install.sh                          install, update and uninstall
 skills/rw/SKILL.md                  the skill: how Claude works through rw
-skills/rw/rw                        the bash tool behind it: run, path, pull, push, diff, status, skills, job, hooks
+skills/rw/rw                        the bash tool behind it: run, path, pull, push, diff, status, skills, job, doctor, hooks
 skills/rw/aliases.example           template for ~/.config/claude-rw/aliases
 skills/rw/.claude-plugin/plugin.json
 skills/rw/hooks/hooks.json          plugin hooks: instant /rw ls, session-end cleanup

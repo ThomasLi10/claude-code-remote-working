@@ -42,7 +42,7 @@ The local machine is only your terminal. Don't read or change local project file
 
 Run `rw T info`. It checks ssh and resolves DIR. It prints the git state, the tools on the login PATH and the mirror dir `M`. It also prints the agent skills installed on the remote (see "Remote skills") and every CLAUDE.md that applies on the remote: DIR and its parents, plus the remote `~/.claude/CLAUDE.md`. Follow those CLAUDE.md files as you would local project instructions. From then on, use the `target:` line it prints as `T`.
 
-If ssh fails, remember it runs with BatchMode and can't answer prompts. Ask the user to run `! ssh HOST true` once (to accept the host key or unlock their key), then retry. Don't work around it some other way.
+If ssh fails, remember it runs with BatchMode and can't answer prompts. The error says whether the host can't be reached or needs a prompt answered; for a prompt, ask the user to run `! ssh HOST true` once (to accept the host key or unlock their key), then retry. Don't work around it some other way. `rw doctor T` (T as the user gave it) checks the local setup, the connection and the remote's tools, and says what is wrong.
 
 ### Short targets
 

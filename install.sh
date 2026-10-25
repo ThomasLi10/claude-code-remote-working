@@ -77,6 +77,7 @@ install() {
 
   say ""
   say "Done. In a new Claude Code session (or after /reload-plugins) try:  /rw ls"
+  say "Check a host with:  $(tilde "$DEST")/rw doctor <host or alias>"
   say "Update later with:  git -C $(tilde "$REPO") pull"
 }
 

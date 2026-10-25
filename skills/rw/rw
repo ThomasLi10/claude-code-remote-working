@@ -12,6 +12,7 @@
 #   rw HOST:DIR job start NAME [CMD...] | ls | logs NAME [LINES] | wait NAME [SECONDS] | stop NAME | rm NAME
 #                                    commands that outlive the call: detached, in DIR, logged on the remote
 #   rw ls                            list the aliases, then other targets info connected to lately
+#   rw doctor [TARGET]               check the local setup and, given TARGET, the ssh connection and the remote
 #   rw hook pre-read|post-write|guard-search|prompt-expansion|stop|session-end   Claude Code hooks (JSON on stdin)
 #
 # PATH is relative to DIR, an absolute remote path, or a local mirror path.
@@ -132,6 +133,14 @@ resolve() {
     esac
   fi
   RP=$(normpath "$RP")
+}
+
+ssh_hint() {  # ssh_hint HOST ERROR -> what to do about an ssh failure, by its kind
+  case $2 in
+    *"Host key verification failed"*|*"Permission denied"*|*passphrase*|*"Too many authentication failures"*)
+      echo "ssh runs with BatchMode=yes (no prompts). Have the user run '! ssh $1 true' once to accept the host key / unlock the key, then retry." ;;
+    *) echo "$1 cannot be reached: it may be down, or ~/.ssh/config may have a wrong address or port." ;;
+  esac
 }
 
 RSSH_ERR=
@@ -427,7 +436,7 @@ EOS
   rc=$?
   if [ -z "$(status_of "$out")" ]; then
     echo "rw: cannot reach $HOST over ssh (exit $rc): $RSSH_ERR" >&2
-    echo "rw: ssh runs with BatchMode=yes (no prompts). Have the user run '! ssh $HOST true' once to accept the host key / unlock the key, then retry." >&2
+    echo "rw: $(ssh_hint "$HOST" "$RSSH_ERR")" >&2
     [ "$BARE" = 1 ] && echo "rw: '$HOST' was taken as a bare ssh host because $ALIASES has no alias of that name; check for a typo." >&2
     return 1
   fi
@@ -723,22 +732,101 @@ cmd_hook() {
   esac
 }
 
+# ---------------------------------------------------------------- doctor
+
+DR_FAILED=0
+dr() { printf '  %-5s %s\n' "$1" "$2"; [ "$1" != FAIL ] || DR_FAILED=1; }  # dr ok|warn|FAIL|hint MESSAGE
+
+cmd_doctor() {  # cmd_doctor [TARGET]: check the local setup, then the connection to TARGET and the remote
+  local t skill out rc line missing=()
+  echo "local:"
+  if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 2) )); then dr ok "bash $BASH_VERSION"
+  else dr warn "bash $BASH_VERSION is older than 4.2: ssh errors are reported without their reason"; fi
+  for t in ssh base64 awk sed diff mktemp find; do command -v "$t" >/dev/null 2>&1 || missing+=("$t"); done
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || missing+=("sha256sum or shasum")
+  if [ ${#missing[@]} -eq 0 ]; then dr ok "tools: ssh, base64, sha256sum, awk, sed, diff, mktemp, find"
+  else dr FAIL "not on PATH: ${missing[*]}"; fi
+  if mkdir -p "$BASE" 2>/dev/null && [ -w "$BASE" ]; then dr ok "mirrors go to $BASE"
+  else dr FAIL "cannot write mirrors to $BASE (set RW_MIRROR_BASE)"; fi
+  if [ -d "$HOME/.ssh" ] && [ -w "$HOME/.ssh" ]; then dr ok "~/.ssh is writable, for the shared ssh connections"
+  else dr FAIL "~/.ssh must exist and be writable: rw keeps its shared ssh connections there"; fi
+  if [ -f "$ALIASES" ]; then dr ok "aliases: $(tilde "$ALIASES"), $(awk '{ sub(/#.*/, "") } NF >= 2' "$ALIASES" | wc -l | tr -d ' ') defined"
+  else dr warn "no aliases file at $(tilde "$ALIASES")"; fi
+  skill=$HOME/.claude/skills/rw
+  if [ -f "$skill/rw" ] && [ "$(cd "$skill" && pwd -P)" = "$(cd "$(dirname "$0")" && pwd -P)" ]; then
+    dr ok "skill: ~/.claude/skills/rw -> $(cd "$skill" && pwd -P)"
+  else dr FAIL "~/.claude/skills/rw is not this rw ($(dirname "$0")); run install.sh"; fi
+  if ! command -v claude >/dev/null 2>&1; then dr warn "claude is not on PATH"
+  elif claude plugin list --json 2>/dev/null | grep -q '"rw@skills-dir"'; then dr ok "Claude Code loads the skill's hooks (rw@skills-dir)"
+  else dr warn "claude plugin list has no rw@skills-dir: no completion, instant /rw ls, stop check or mirror cleanup"; fi
+  [ $# -gt 0 ] || return $DR_FAILED
+
+  parse_target "$1"
+  echo "remote ($ARG0 = $HOST:$DIR):"
+  init_tmpd
+  out=$(tmpfile)
+  {
+    printf 'd=%s\n%s\n' "$(q "$DIR")" "$REMOTE_ENV"
+    cat <<'EOS'
+echo "__RW_STATUS__ ok"
+echo "host $(whoami)@$(hostname) ($(uname -sm)), bash $BASH_VERSION"
+m=; for t in base64 mktemp; do command -v $t >/dev/null 2>&1 || m="$m $t"; done
+command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 || m="$m sha256sum/shasum/openssl"
+echo "missing$m"
+o=; for t in git rg setsid; do command -v $t >/dev/null 2>&1 || o="$o $t"; done
+echo "optional$o"
+rw_env force 2>/dev/null
+if [ -s "$rw_envf" ]; then echo "env $(grep -c '^export ' "$rw_envf")"; else echo "env none"; fi
+case $d in "~") d=$HOME ;; "~/"*) d=$HOME/${d#"~/"} ;; /*) ;; *) d=$HOME/$d ;; esac
+if cd -- "$d" 2>/dev/null; then echo "dir $(pwd)"; else echo "nodir $d"; fi
+EOS
+  } | rssh "$HOST" "$out" bash -l -s
+  rc=$?
+  if [ -z "$(status_of "$out")" ]; then
+    dr FAIL "ssh $HOST failed (exit $rc): ${RSSH_ERR:-no message}"
+    dr hint "$(ssh_hint "$HOST" "$RSSH_ERR")"
+    return 1
+  fi
+  dr ok "ssh $HOST logs in without prompts"
+  while IFS= read -r line; do
+    case $line in
+      "host "*) dr ok "${line#host }" ;;
+      "missing "*) dr FAIL "not on the remote's login PATH:${line#missing}" ;;
+      "optional "*) dr warn "not on the remote's login PATH:${line#optional} (optional)" ;;
+      "env none") dr warn "the interactive shell environment could not be captured; commands get the plain login one" ;;
+      "env "*) dr ok "${line#env } variables from the interactive shell startup are loaded before each command" ;;
+      "dir "*) dr ok "directory ${line#dir }" ;;
+      "nodir "*) dr FAIL "no directory ${line#nodir } on the remote" ;;
+    esac
+  done < <(sed -n '/^__RW_STATUS__ ok$/,$p' "$out" | tail -n +2)
+  if ssh "${SSH_OPTS[@]}" -O check "$HOST" 2>/dev/null; then dr ok "the ssh connection is shared, so later calls are quick"
+  else dr warn "ssh connection sharing (ControlMaster) is not active: every call opens a new connection"; fi
+  return $DR_FAILED
+}
+
 # ---------------------------------------------------------------- main
 
-[ $# -ge 1 ] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
-if [ "$1" = hook ]; then shift; cmd_hook "$@"; exit; fi
-if [ "$1" = ls ]; then cmd_ls; exit; fi
+parse_target() {  # parse_target ARG -> ARG0, HOST, DIR (relative or ~ until info resolves it), BARE=1 for a bare HOST
+  local target
+  ARG0=$1 BARE=0  # ARG0, the target as typed (alias, HOST or HOST:DIR), keys its skill cache
+  case $1 in
+    *:*) target=$1 ;;
+    *) target=$(alias_of "$1") || { target="$1:~"; BARE=1; } ;;  # an alias, else a bare HOST = its home dir
+  esac
+  case $target in *:*) ;; *) die "alias '$1' in $ALIASES must be HOST:DIR, got '$target'" ;; esac
+  HOST=${target%%:*}; DIR=${target#*:}
+  [ -n "$HOST" ] && [ -n "$DIR" ] || die "first argument must be HOST:DIR, HOST or an alias, e.g. devbox:/home/alice/code/api"
+}
 
-ARG0=$1  # the target as typed (alias, HOST or HOST:DIR): the key of its skill cache
-BARE=0
+[ $# -ge 1 ] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2; }
 case $1 in
-  *:*) target=$1 ;;
-  *) target=$(alias_of "$1") || { target="$1:~"; BARE=1; } ;;  # an alias, else a bare HOST = its home dir
+  hook) shift; cmd_hook "$@"; exit ;;
+  ls) cmd_ls; exit ;;
+  doctor) shift; cmd_doctor "$@"; exit ;;
 esac
-case $target in *:*) ;; *) die "alias '$1' in $ALIASES must be HOST:DIR, got '$target'" ;; esac
-HOST=${target%%:*}; DIR=${target#*:}
+
+parse_target "$1"
 shift
-[ -n "$HOST" ] && [ -n "$DIR" ] || die "first argument must be HOST:DIR, HOST or an alias, e.g. devbox:/home/alice/code/api"
 sub=${1:-}; [ $# -gt 0 ] && shift
 if [ "$sub" != info ] && [ "$sub" != skills ]; then
   case $DIR in /*) DIR=$(normpath "$DIR") ;; *) die "DIR must be absolute (run: rw $HOST:$DIR info to resolve it)" ;; esac

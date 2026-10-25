@@ -42,6 +42,8 @@ git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/cl
 
 skill 目录本身也是一个 Claude Code 插件（`rw@skills-dir`），Claude Code 会从 skills 目录自动加载它。插件的 hook 负责：`/rw` 之后补全 host、远端目录、alias 和远端 skill；在状态栏显示当前目标；不经模型直接响应 `/rw ls`；镜像里还有未同步的修改时不让这一轮结束；会话结束时清理镜像。所以不需要改 `settings.json`。
 
+**检查**：`~/.claude/skills/rw/rw doctor <host 或 alias>` 先检查本机配置，再检查 ssh 能否免交互登录、远端工具是否齐全、shell 环境能否采集、目录是否存在，并告诉你该改什么。
+
 **更新**：`git -C ~/code/claude-code-remote-working pull`。因为是软链，新版本立即生效；hook 的改动在下一个会话或执行 `/reload-plugins` 后生效。
 
 **卸载**：`~/code/claude-code-remote-working/install.sh --uninstall`，只删除软链，保留你的 alias。
@@ -117,7 +119,7 @@ HOST 可以是 ssh 能接受的任何写法。alias 和 ssh 主机同名时，al
 ```text
 install.sh                          安装、更新、卸载
 skills/rw/SKILL.md                  skill 本体：告诉 Claude 如何通过 rw 工作
-skills/rw/rw                        背后的 bash 工具：run、path、pull、push、diff、status、skills、job、hooks
+skills/rw/rw                        背后的 bash 工具：run、path、pull、push、diff、status、skills、job、doctor、hooks
 skills/rw/aliases.example           ~/.config/claude-rw/aliases 的模板
 skills/rw/.claude-plugin/plugin.json
 skills/rw/hooks/hooks.json          插件 hook：即时的 /rw ls、会话结束时的清理
