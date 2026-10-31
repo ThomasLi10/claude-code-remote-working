@@ -80,6 +80,7 @@ Each session has its own mirror, kept in memory and deleted when the session end
 - After a remote command that may rewrite files (formatter, codegen, `git checkout/pull/stash/rebase`), Read files again before you edit them.
 - Delete, move and chmod remotely with `run` (`git mv`, `rm`, `chmod +x`).
 - The mirror holds only the files you've opened. Don't explore it with Grep, Glob or ls (a hook blocks Grep and Glob there); search on the remote instead. Never run project commands locally in the mirror, because it isn't a checkout.
+- On a lossy link a transfer can stall. When nothing comes back for 30 s (`RW_STALL_SECS`), rw sets the shared connection aside and retries once over a new one, so a Read or pull may take that long. If it still fails with "the network to HOST is stalling", wait a minute and retry, or tell the user. Don't work around it with your own `ssh`/`scp` through rw's ControlPath: they go over the same stuck connection.
 - A file over 10 MB (`RW_MAX_FILE_MB`) isn't moved whole: Read refuses it and says so. Look at parts of it with `run` (`tail -n 200`, `grep -n`, `head -c`), or ask the user before raising the limit.
 
 If you don't see `rw: synced …` after an Edit or Write, the hooks aren't active. In that case run `rw T pull <path>` before each Read and `rw T push <path>` after each edit yourself.

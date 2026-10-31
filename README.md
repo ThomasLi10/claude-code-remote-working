@@ -15,7 +15,7 @@ English | [简体中文](README.zh-CN.md)
 
 ## How it works
 
-- **Commands** run as `rw T run '<cmd>'`: a fresh `bash -l` in the remote directory. The variables the remote's interactive shell startup sets (PATH, conda, nvm, proxies, ...) are captured once, cached on the remote and loaded before every command, so commands see what your own shell there sees. ssh connections are multiplexed (`ControlMaster`), so repeated calls are fast.
+- **Commands** run as `rw T run '<cmd>'`: a fresh `bash -l` in the remote directory. The variables the remote's interactive shell startup sets (PATH, conda, nvm, proxies, ...) are captured once, cached on the remote and loaded before every command, so commands see what your own shell there sees. ssh connections are multiplexed (`ControlMaster`) and compressed, so repeated calls are fast. On a lossy link a file transfer that stalls is retried over a new connection.
 - **Files** are read and edited through a local mirror: remote `HOST:/abs/path` is `<mirror>/HOST/abs/path`. Hooks make the mirror transparent:
   - *Read* fetches the current remote file first, so a read is never stale.
   - *Edit* and *Write* upload the file right away. The transfer is checked with sha256, missing parent directories are created and existing files keep their permissions.
@@ -93,6 +93,7 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 | `RW_MIRROR_BASE` | `/dev/shm/claude-remote`, or `$TMPDIR/claude-remote-$UID` without `/dev/shm` | where the session mirrors live |
 | `RW_MIRROR` | (none) | one fixed mirror directory instead of one per session |
 | `RW_MAX_FILE_MB` | `10` | files bigger than this are not moved whole through the mirror; `0` turns the limit off |
+| `RW_STALL_SECS` | `30` | a file transfer that gets nothing back for this long is stuck: rw sets the shared connection aside, retries once over a new one, then reports the stall; `0` waits forever |
 
 ## Where things are
 
@@ -111,7 +112,7 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 
 - There is no tty: commands get EOF on stdin, so use non-interactive flags. Servers, watchers and long runs go in `rw T job start`.
 - The mirror only holds the files Claude has opened; searching happens on the remote.
-- Every read and write moves the whole file (base64 over ssh): fine for source files, too slow for big ones, which is why files over `RW_MAX_FILE_MB` are refused.
+- Every read and write moves the whole file (base64 over compressed ssh): fine for source files, too slow for big ones, which is why files over `RW_MAX_FILE_MB` are refused.
 - Tested with Linux on both ends.
 
 ## Repository layout

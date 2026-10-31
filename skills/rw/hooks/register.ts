@@ -151,7 +151,9 @@ done`
 // One round trip over the ssh connection rw shares (its options, no login shell: a listing needs no
 // environment). It answers DIR's directories and caches each one's own, so taking one lists at once.
 function fetchListing($: EngineInterface, p: Paths, host: string, dir: string): Promise<Dir[]> {
+  // the first call to a host starts the master that rw's own calls then share, so it takes rw's connection options
   const argv = ['ssh', ...p.sshOpts, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ControlMaster=auto']
+  argv.push('-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=4', '-o', 'Compression=yes')
   argv.push('-o', `ControlPath=${p.home}/.ssh/rw-%C`, '-o', 'ControlPersist=30m', host, 'sh -s')
   const run = detached($, () => $.process.run(argv, { stdin: `p=${quote(dir)}\n${LIST_DIRS}\n`, timeoutMs: 15_000 }))
   return run.then(r => {

@@ -42,7 +42,10 @@ ALIASES=${RW_ALIASES:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-rw/aliases}
 MAX_MB=${RW_MAX_FILE_MB:-10}; [[ $MAX_MB =~ ^[0-9]+$ ]] || MAX_MB=10  # bigger files are not moved whole; 0 = no limit
 MAX_BYTES=$((MAX_MB * 1024 * 1024))
 
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4
+STALL=${RW_STALL_SECS:-30}; [[ $STALL =~ ^[0-9]+$ ]] || STALL=30  # a file transfer silent this long is stuck; 0 = wait forever
+[ "$STALL" -eq 0 ] || [ "$STALL" -ge 10 ] || STALL=10  # the remote sends a heartbeat every 5 s
+
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4 -o Compression=yes
           -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/rw-%C" -o ControlPersist=30m)
 # shellcheck disable=SC2206  # word splitting is intended
 [ -n "${RW_SSH_OPTS:-}" ] && SSH_OPTS=($RW_SSH_OPTS "${SSH_OPTS[@]}")
@@ -143,14 +146,52 @@ ssh_hint() {  # ssh_hint HOST ERROR -> what to do about an ssh failure, by its k
   esac
 }
 
+# rssh's remote scripts start with this: a line on stderr at once and every 5 s after, so a call that receives
+# nothing for $STALL seconds is stuck, not just slow
+IFS= read -r -d '' REMOTE_HB <<'EOS'
+( while echo __RW_HB__ >&2; do sleep 5 </dev/null >/dev/null 2>&1; done ) </dev/null >/dev/null &
+rw_hb=$!
+trap 'kill $rw_hb 2>/dev/null' EXIT
+EOS
+
+STALLED=
+ssh_watched() {  # ssh_watched IN OUT ERR HOST CMD... -> ssh's exit code; kills ssh and sets STALLED=1 after $STALL silent seconds
+  local in=$1 out=$2 err=$3 pid wd= flag rc; shift 3
+  flag=$(tmpfile); rm -f "$flag"; STALLED=
+  ssh "${SSH_OPTS[@]}" "$@" < "$in" > "$out" 2> "$err" &
+  pid=$!
+  if [ "$STALL" -gt 0 ]; then
+    ( n=-1 quiet=0
+      while sleep 2; do
+        m=$(( $(wc -c < "$out") + $(wc -c < "$err") ))
+        if [ "$m" != "$n" ]; then n=$m quiet=0; else quiet=$((quiet + 2)); fi
+        [ "$quiet" -lt "$STALL" ] || { : > "$flag"; kill "$pid"; exit 0; }
+      done ) > /dev/null 2>&1 &  # no stdout: a leftover sleep must not hold a pipe the caller reads
+    wd=$!
+  fi
+  wait "$pid" 2>/dev/null; rc=$?
+  [ -z "$wd" ] || { kill "$wd"; wait "$wd"; } 2>/dev/null
+  [ ! -e "$flag" ] || STALLED=1
+  return $rc
+}
+
+# On a lossy link one ssh connection can stall for minutes (TCP backs off) while a new one would get through,
+# and a stalled shared master stalls every call made over it. So when a call gets nothing for $STALL seconds,
+# rssh takes the master out of service (`-O stop`: the sessions it already runs go on, new calls open a new
+# connection) and tries once more.
 RSSH_ERR=
 rssh() {  # rssh HOST OUTFILE REMOTE_CMD... ; remote script on stdin
-  local host=$1 out=$2; shift 2
-  local err; err=$(tmpfile)
-  ssh "${SSH_OPTS[@]}" "$host" "$@" > "$out" 2> "$err"
-  local rc=$?
-  RSSH_ERR=$(tail -n 5 "$err")
-  return $rc
+  local host=$1 out=$2 in err try rc; shift 2
+  in=$(tmpfile); err=$(tmpfile)
+  { printf '%s\n' "$REMOTE_HB"; cat; } > "$in"
+  for try in 1 2; do
+    ssh_watched "$in" "$out" "$err" "$host" "$@"; rc=$?
+    RSSH_ERR=$(grep -vx '__RW_HB__' "$err" | tail -n 5)
+    [ "$STALLED" = 1 ] || return $rc
+    ssh "${SSH_OPTS[@]}" -O stop "$host" < /dev/null > /dev/null 2>&1
+  done
+  RSSH_ERR="nothing came back from $host for $STALL s, twice (the second time over a new connection): the network to it is stalling (RW_STALL_SECS sets the wait)"
+  return 255
 }
 
 REMOTE_LIB='rw_h() {
@@ -297,6 +338,7 @@ upload() {
     cat <<'EOS'
 cur=$(rw_h "$f")
 if [ "$cur" = DIR ]; then echo "__RW_STATUS__ dir"; exit 0; fi
+if [ "$cur" = "$want" ]; then echo "__RW_STATUS__ ok $cur"; exit 0; fi  # already there, e.g. a retry after a lost reply
 if [ "$base" != ANY ] && [ "$cur" != "$base" ]; then echo "__RW_STATUS__ conflict $cur"; exit 0; fi
 mkdir -p -- "$(dirname -- "$f")" || { echo "__RW_STATUS__ error cannot create parent directory"; exit 0; }
 tmp=$(mktemp) || { echo "__RW_STATUS__ error mktemp failed"; exit 0; }
