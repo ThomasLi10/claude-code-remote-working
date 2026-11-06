@@ -33,6 +33,26 @@ English | [简体中文](README.zh-CN.md)
 
 ## Install
 
+Pick one of the two ways below; `install.sh` warns when it finds the other one installed too.
+
+### From the plugin marketplace
+
+```bash
+claude plugin install rw --marketplace ThomasLi10/claude-code-remote-working
+```
+
+or, in a Claude Code session, `/plugin install rw --marketplace ThomasLi10/claude-code-remote-working` (Claude Code 2.1.275 or later). This adds this repository as the marketplace `remote-working` and installs the plugin `rw@remote-working`, hooks included. Its skill's full name is `/rw:rw`, and `/rw` runs it too.
+
+There is no aliases file yet: ask Claude to add an alias, or copy [`aliases.example`](skills/rw/aliases.example) to `~/.config/claude-rw/aliases`.
+
+**Update:** `claude plugin marketplace update remote-working && claude plugin update rw@remote-working`, then `/reload-plugins` or a new session. Marketplaces other than Anthropic's don't update by themselves unless you turn on auto-update for `remote-working` under `/plugin` → **Marketplaces**.
+
+**Uninstall:** `claude plugin uninstall rw@remote-working`. Your aliases stay.
+
+### From a git checkout
+
+Follows the checkout, so every `git pull` is live at once.
+
 ```bash
 git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/claude-code-remote-working \
   && ~/code/claude-code-remote-working/install.sh
@@ -42,11 +62,13 @@ git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/cl
 
 The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude Code loads from the skills folder by itself. Its hooks complete hosts, remote directories, aliases and remote skills after `/rw`, show the current target at the right of the prompt footer, answer `/rw ls` without a model call, keep a turn from ending with unpushed edits, and clean up mirrors at session end, so there is nothing to add to `settings.json`.
 
-**Check:** `~/.claude/skills/rw/rw doctor <host or alias>` checks the local setup, then whether ssh logs in without prompts, the tools on the remote, the captured shell environment and the directory, and says what to fix.
-
 **Update:** `git -C ~/code/claude-code-remote-working pull`. Because of the link, the new version is live at once; hook changes apply in the next session or after `/reload-plugins`.
 
 **Uninstall:** `~/code/claude-code-remote-working/install.sh --uninstall` removes the link and keeps your aliases.
+
+### Check
+
+`~/.claude/skills/rw/rw doctor <host or alias>` checks the local setup, then whether ssh logs in without prompts, the tools on the remote, the captured shell environment and the directory, and says what to fix. For a marketplace install, `rw` is in the plugin's folder, the `installPath` that `claude plugin list --json` shows for `rw@remote-working`.
 
 ## Usage
 
@@ -100,6 +122,7 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 | What | Path |
 |---|---|
 | the skill (a link to this checkout) | `~/.claude/skills/rw` |
+| the skill, installed from the marketplace | `~/.claude/plugins/cache/remote-working/rw/<version>/` |
 | your aliases | `~/.config/claude-rw/aliases` |
 | session mirrors | `/dev/shm/claude-remote/<session id>/` |
 | remote skill lists cached for Tab completion | `~/.cache/claude-rw/skills/` |
@@ -118,7 +141,8 @@ HOST is anything ssh accepts. An alias wins over an ssh host of the same name. D
 ## Repository layout
 
 ```text
-install.sh                          install, update and uninstall
+.claude-plugin/marketplace.json     the plugin marketplace "remote-working", which lists skills/rw
+install.sh                          install, update and uninstall from a checkout
 skills/rw/SKILL.md                  the skill: how Claude works through rw
 skills/rw/rw                        the bash tool behind it: run, path, pull, push, diff, status, skills, job, doctor, hooks
 skills/rw/aliases.example           template for ~/.config/claude-rw/aliases

@@ -737,7 +737,7 @@ cmd_hook() {
       echo "rw: the mirror only holds files you have opened, so searching it is misleading. Search on the remote instead, e.g. rw HOST:DIR run 'rg -n PATTERN' (or git grep -n / git ls-files / find)." >&2
       return 2 ;;
     prompt-expansion)  # "/rw ls" or a bare "/rw": show the aliases at once instead of starting a model turn
-      [ "$(json_str command_name "$input")" = rw ] || return 0
+      case $(json_str command_name "$input") in rw|rw:rw) ;; *) return 0 ;; esac  # rw:rw from a marketplace
       read -r a <<< "$(json_str command_args "$input")"
       case $a in
         ls) r=$(cmd_ls) ;;
@@ -780,7 +780,7 @@ DR_FAILED=0
 dr() { printf '  %-5s %s\n' "$1" "$2"; [ "$1" != FAIL ] || DR_FAILED=1; }  # dr ok|warn|FAIL|hint MESSAGE
 
 cmd_doctor() {  # cmd_doctor [TARGET]: check the local setup, then the connection to TARGET and the remote
-  local t skill out rc line missing=()
+  local t skill here want list id out rc line missing=()
   echo "local:"
   if (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 2) )); then dr ok "bash $BASH_VERSION"
   else dr warn "bash $BASH_VERSION is older than 4.2: ssh errors are reported without their reason"; fi
@@ -794,13 +794,16 @@ cmd_doctor() {  # cmd_doctor [TARGET]: check the local setup, then the connectio
   else dr FAIL "~/.ssh must exist and be writable: rw keeps its shared ssh connections there"; fi
   if [ -f "$ALIASES" ]; then dr ok "aliases: $(tilde "$ALIASES"), $(awk '{ sub(/#.*/, "") } NF >= 2' "$ALIASES" | wc -l | tr -d ' ') defined"
   else dr warn "no aliases file at $(tilde "$ALIASES")"; fi
-  skill=$HOME/.claude/skills/rw
-  if [ -f "$skill/rw" ] && [ "$(cd "$skill" && pwd -P)" = "$(cd "$(dirname "$0")" && pwd -P)" ]; then
-    dr ok "skill: ~/.claude/skills/rw -> $(cd "$skill" && pwd -P)"
-  else dr FAIL "~/.claude/skills/rw is not this rw ($(dirname "$0")); run install.sh"; fi
+  # installed by install.sh (~/.claude/skills/rw links here) or from a marketplace (no ~/.claude/skills/rw);
+  # a ~/.claude/skills/rw that is some other rw is the skill Claude Code runs, in place of this one
+  skill=$HOME/.claude/skills/rw here=$(cd "$(dirname "$0")" && pwd -P) want=rw@skills-dir
+  if [ -f "$skill/rw" ] && [ "$(cd "$skill" && pwd -P)" = "$here" ]; then dr ok "skill: ~/.claude/skills/rw -> $here"
+  elif [ -e "$skill" ] || [ -L "$skill" ]; then dr FAIL "~/.claude/skills/rw is not this rw ($here) and Claude Code runs that one; run install.sh, or remove it"
+  else dr ok "skill: the rw plugin in $(tilde "$here")"; want=rw@; fi
   if ! command -v claude >/dev/null 2>&1; then dr warn "claude is not on PATH"
-  elif claude plugin list --json 2>/dev/null | grep -q '"rw@skills-dir"'; then dr ok "Claude Code loads the skill's hooks (rw@skills-dir)"
-  else dr warn "claude plugin list has no rw@skills-dir: no completion, instant /rw ls, stop check or mirror cleanup"; fi
+  elif list=$(claude plugin list --json 2>/dev/null); id=$(grep -o -m 1 "\"$want[^\"]*\"" <<< "$list"); then
+    dr ok "Claude Code loads the skill's hooks (${id//\"/})"
+  else dr warn "claude plugin list has no ${want/%@/ plugin}: no completion, instant /rw ls, stop check or mirror cleanup"; fi
   [ $# -gt 0 ] || return $DR_FAILED
 
   parse_target "$1"

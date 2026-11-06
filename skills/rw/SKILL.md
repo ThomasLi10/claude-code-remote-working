@@ -7,17 +7,17 @@ hooks:
     - matcher: "Read"
       hooks:
         - type: command
-          command: '"$HOME/.claude/skills/rw/rw" hook pre-read'
+          command: '"${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/rw}/rw" hook pre-read'
           timeout: 120
     - matcher: "Grep|Glob"
       hooks:
         - type: command
-          command: '"$HOME/.claude/skills/rw/rw" hook guard-search'
+          command: '"${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/rw}/rw" hook guard-search'
   PostToolUse:
     - matcher: "Edit|MultiEdit|Write|NotebookEdit"
       hooks:
         - type: command
-          command: '"$HOME/.claude/skills/rw/rw" hook post-write'
+          command: '"${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/rw}/rw" hook post-write'
           timeout: 120
 ---
 

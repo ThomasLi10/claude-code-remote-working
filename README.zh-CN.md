@@ -33,6 +33,26 @@
 
 ## 安装
 
+下面两种方式选一种即可；如果两种都装了，`install.sh` 会给出提示。
+
+### 从插件市场安装
+
+```bash
+claude plugin install rw --marketplace ThomasLi10/claude-code-remote-working
+```
+
+也可以在 Claude Code 会话里执行 `/plugin install rw --marketplace ThomasLi10/claude-code-remote-working`（需要 Claude Code 2.1.275 或更新版本）。这会把本仓库添加为名为 `remote-working` 的插件市场，并安装插件 `rw@remote-working`，hook 一并生效。skill 的完整名称是 `/rw:rw`，直接输入 `/rw` 也能用。
+
+这种方式不会生成 alias 文件：可以直接让 Claude 帮你添加 alias，或者把 [`aliases.example`](skills/rw/aliases.example) 复制到 `~/.config/claude-rw/aliases`。
+
+**更新**：`claude plugin marketplace update remote-working && claude plugin update rw@remote-working`，然后执行 `/reload-plugins` 或开一个新会话。除 Anthropic 官方以外的插件市场默认不会自动更新，如需自动更新，在 `/plugin` → **Marketplaces** 里为 `remote-working` 打开即可。
+
+**卸载**：`claude plugin uninstall rw@remote-working`，你的 alias 会保留。
+
+### 从 git 仓库安装
+
+skill 直接指向本地仓库，每次 `git pull` 后立即生效。
+
 ```bash
 git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/claude-code-remote-working \
   && ~/code/claude-code-remote-working/install.sh
@@ -42,11 +62,13 @@ git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/cl
 
 skill 目录本身也是一个 Claude Code 插件（`rw@skills-dir`），Claude Code 会从 skills 目录自动加载它。插件的 hook 负责：`/rw` 之后补全 host、远端目录、alias 和远端 skill；在输入框下方页脚的右侧显示当前目标；不经模型直接响应 `/rw ls`；镜像里还有未同步的修改时不让这一轮结束；会话结束时清理镜像。所以不需要改 `settings.json`。
 
-**检查**：`~/.claude/skills/rw/rw doctor <host 或 alias>` 先检查本机配置，再检查 ssh 能否免交互登录、远端工具是否齐全、shell 环境能否采集、目录是否存在，并告诉你该改什么。
-
 **更新**：`git -C ~/code/claude-code-remote-working pull`。因为是软链，新版本立即生效；hook 的改动在下一个会话或执行 `/reload-plugins` 后生效。
 
 **卸载**：`~/code/claude-code-remote-working/install.sh --uninstall`，只删除软链，保留你的 alias。
+
+### 检查
+
+`~/.claude/skills/rw/rw doctor <host 或 alias>` 先检查本机配置，再检查 ssh 能否免交互登录、远端工具是否齐全、shell 环境能否采集、目录是否存在，并告诉你该改什么。如果是从插件市场安装的，`rw` 位于插件目录下，即 `claude plugin list --json` 中 `rw@remote-working` 的 `installPath`。
 
 ## 用法
 
@@ -100,6 +122,7 @@ HOST 可以是 ssh 能接受的任何写法。alias 和 ssh 主机同名时，al
 | 内容 | 路径 |
 |---|---|
 | skill（指向本仓库的软链） | `~/.claude/skills/rw` |
+| skill（从插件市场安装） | `~/.claude/plugins/cache/remote-working/rw/<版本>/` |
 | 你的 alias | `~/.config/claude-rw/aliases` |
 | 会话镜像 | `/dev/shm/claude-remote/<会话 ID>/` |
 | 远端 skill 列表缓存（用于 Tab 补全） | `~/.cache/claude-rw/skills/` |
@@ -118,7 +141,8 @@ HOST 可以是 ssh 能接受的任何写法。alias 和 ssh 主机同名时，al
 ## 仓库结构
 
 ```text
-install.sh                          安装、更新、卸载
+.claude-plugin/marketplace.json     插件市场 "remote-working"，收录 skills/rw
+install.sh                          从 git 仓库安装、更新、卸载
 skills/rw/SKILL.md                  skill 本体：告诉 Claude 如何通过 rw 工作
 skills/rw/rw                        背后的 bash 工具：run、path、pull、push、diff、status、skills、job、doctor、hooks
 skills/rw/aliases.example           ~/.config/claude-rw/aliases 的模板

@@ -68,7 +68,14 @@ install() {
 
   "$DEST/rw" ls >/dev/null || die "$(tilde "$DEST")/rw does not run"
   if command -v claude >/dev/null 2>&1; then
-    if claude plugin list --json 2>/dev/null | grep -q '"rw@skills-dir"'; then
+    local list other
+    list=$(claude plugin list --json 2>/dev/null || true)
+    other=$(grep -o '"rw@[^"]*"' <<< "$list" | tr -d '"' | grep -v -m 1 '^rw@skills-dir$' || true)
+    if [ -n "$other" ]; then
+      warn "rw is also installed from a plugin marketplace ($other). Keep one of the two:"
+      warn "  claude plugin uninstall $other    or    $(tilde "$REPO")/install.sh --uninstall"
+    fi
+    if grep -q '"rw@skills-dir"' <<< "$list"; then
       say "Claude Code loads the skill's hooks (rw@skills-dir)"
     else
       warn "'claude plugin list' does not show rw@skills-dir. /rw still works, but /rw ls goes through the model and session mirrors are not cleaned up; a newer Claude Code fixes this"

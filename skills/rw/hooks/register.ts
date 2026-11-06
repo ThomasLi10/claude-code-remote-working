@@ -42,8 +42,11 @@ function detached<T>($: EngineInterface, work: () => Promise<T>): Promise<T> {
 }
 
 // The same locations and ssh options `rw` uses: its aliases file, skill-list cache, recent targets.
+// `rw` itself is the one beside this module, wherever the plugin was installed: ~/.claude/skills/rw,
+// or the plugin cache for an install from a marketplace.
 function locate($: EngineInterface): Promise<Paths> {
   if (paths) return paths
+  const rw = `${$.plugin.root}/rw`
   const argv = [
     'sh',
     '-c',
@@ -55,7 +58,7 @@ function locate($: EngineInterface): Promise<Paths> {
       const [home = '', cache = '', aliases = '', sshOpts = ''] = r.stdout.split('\n')
       return {
         home,
-        rw: `${home}/.claude/skills/rw/rw`,
+        rw,
         aliases,
         skills: `${cache}/claude-rw/skills`,
         recent: `${cache}/claude-rw/recent`,
@@ -284,25 +287,30 @@ async function skillRows($: EngineInterface, target: string, typed: string): Pro
   )
 }
 
+// The skill's command: /rw, or /rw:rw, its full name when the plugin came from a marketplace.
+const COMMAND = /^\/rw(?::rw)?$/
+const AFTER_COMMAND = /^\s*\/rw(?::rw)?\s+$/
+const AFTER_TARGET = /^\s*\/rw(?::rw)?\s+(\S+)\s+$/
+
 async function suggest($: EngineInterface, text: string, start: number, token: string) {
   const before = text.slice(0, start)
   // the prompt box asks for no word after a bare "/rw ", so "/rw" itself offers every target; it also
   // lists the home and root of the hosts the aliases and recent targets name, which opens their shared
   // ssh connections ahead of the listings and commands that follow
-  if (token === '/rw' && /^\s*$/.test(before)) {
+  if (COMMAND.test(token) && /^\s*$/.test(before)) {
     const p = await locate($)
     const [named, used] = await Promise.all([aliases($, p), recent($, p)])
     const targets = [...named.map(a => a.target), ...used].filter(t => t.includes(':'))
     for (const host of [...new Set(targets.map(t => t.slice(0, t.indexOf(':'))))].slice(0, 5)) {
       for (const dir of ['~/', '/']) void listDirs($, p, host, dir)?.catch(() => undefined)
     }
-    return (await targetRows($, '')).map(r => ({ ...r, text: `/rw ${r.text}`, label: r.label ?? r.text }))
+    return (await targetRows($, '')).map(r => ({ ...r, text: `${token} ${r.text}`, label: r.label ?? r.text }))
   }
-  if (/^\s*\/rw\s+$/.test(before)) {
+  if (AFTER_COMMAND.test(before)) {
     const m = token.match(/^([^\s:/]+):(.*)$/)
     return m ? dirRows($, m[1] ?? '', m[2] ?? '') : targetRows($, token)
   }
-  const target = before.match(/^\s*\/rw\s+(\S+)\s+$/)?.[1]
+  const target = before.match(AFTER_TARGET)?.[1]
   return target && token.startsWith('/') ? skillRows($, target, token.slice(1)) : []
 }
 
@@ -378,7 +386,7 @@ export const register: Register = on => {
     return { suggestions: [...own.suggestions, ...mine] }
   })
 
-  on('command.describe', { command: 'rw' }, async ($, e, next) => {
+  on('command.describe', { command: ['rw', 'rw:rw'] }, async ($, e, next) => {
     const described = await next(e)
     const names = (await aliases($, await locate($))).map(a => a.name)
     hinted = names.join(' ')

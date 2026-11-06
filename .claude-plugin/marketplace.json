@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "remote-working",
+  "description": "rw for Claude Code: work in a directory on any SSH host as if it were your local working directory.",
+  "owner": {
+    "name": "Thomas",
+    "url": "https://github.com/ThomasLi10"
+  },
+  "plugins": [
+    {
+      "name": "rw",
+      "source": "./skills/rw",
+      "description": "Work in a directory on any SSH host as if it were your local working directory: Claude reads, edits and runs commands there over plain ssh, with nothing installed on the remote.",
+      "category": "development",
+      "tags": ["ssh", "remote", "devbox"]
+    }
+  ]
+}
