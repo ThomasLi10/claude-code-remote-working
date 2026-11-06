@@ -5,7 +5,7 @@ import type { EngineInterface, PromptAutocompleteSuggestion, Register } from 'cl
 //   /rw a<Tab>          -> the aliases, recent targets and ssh hosts (~/.ssh/config) starting with "a", and `ls`
 //   /rw host:<Tab>      -> the directories in host's home; taking one lists its subdirectories, and so on
 //   /rw api /r<Tab>     -> the agent skills on api's host, as `rw api skills` lists them
-// The dim hint after "/rw " names the aliases, and the status line shows the target rw last worked in.
+// The dim hint after "/rw " names the aliases, and the prompt footer shows the target rw last worked in.
 // Typing never waits long on ssh: skill lists come from the cache `rw` writes on every `info` or `skills`
 // call (a missing or old one is refreshed in the background), and remote directories are listed a level
 // ahead of the one being typed, starting as soon as a host's name is.
@@ -309,11 +309,66 @@ async function suggest($: EngineInterface, text: string, start: number, token: s
 // Any rw call names its target: `info` prints the resolved one, the other commands take HOST:DIR.
 const RW_CALL = /(?:^|[\s;&|(])(?:\S*\/)?rw["']?\s+(\S+)\s+(info|run|path|pull|push|diff|status|skills|job)\b/
 
+// The target rw last worked in this session, as the prompt footer shows it. A reload of the plugin, a
+// restart or `claude --resume` starts this module without it, so each session's is also kept in the
+// plugin's store and read back at load; a session the store has none for falls back to the newest rw
+// call its transcript holds (sessions that used rw before the store kept targets, say).
+let lastTarget: string | undefined
+const KEPT_PREFIX = 'target:' // store key of a session's target: "target:<session id>"
+const KEPT_SESSIONS = 200 // the store forgets the targets of older sessions than this many
+
 function workedIn(command: string, output: string | undefined) {
   const m = command.match(RW_CALL)
   if (!m) return undefined
   if (m[2] === 'info') return output?.match(/^target: (\S+)$/m)?.[1]
   return m[1]?.includes(':/') ? m[1] : undefined
+}
+
+function show($: EngineInterface, target: string | undefined) {
+  if (target === lastTarget) return
+  lastTarget = target
+  $.ui.invalidate('ui.render')
+}
+
+async function remember($: EngineInterface, target: string) {
+  const key = KEPT_PREFIX + (await $.session.id())
+  await $.store.delete(key) // so the key moves to the end: the store lists keys in insertion order
+  await $.store.set(key, target)
+  const kept = (await $.store.keys()).filter(k => k.startsWith(KEPT_PREFIX))
+  for (const old of kept.slice(0, -KEPT_SESSIONS)) await $.store.delete(old)
+}
+
+async function recall($: EngineInterface): Promise<string | undefined> {
+  const kept = await $.store.get(KEPT_PREFIX + (await $.session.id()))
+  if (typeof kept === 'string') return kept
+  const messages = await $.session.messages()
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const uses = messages[i]?.toolUses ?? []
+    for (let j = uses.length - 1; j >= 0; j--) {
+      const use = uses[j]
+      const command = use?.input.command
+      const target = use?.tool === 'Bash' && typeof command === 'string' ? workedIn(command, use.text) : undefined
+      if (target) return target
+    }
+  }
+  return undefined
+}
+
+// Shows the target of the session the engine runs now, on a timer outside the hook that asks. After a
+// /clear or a resume (`ended` is the session that ended), it waits until the engine runs another one.
+function restore($: EngineInterface, ended?: string, tries = 20) {
+  $.clock.after(ended === undefined ? 0 : 250, () => {
+    void (async () => {
+      if (ended !== undefined && (await $.session.id()) === ended) {
+        if (tries > 1) restore($, ended, tries - 1)
+        return
+      }
+      const target = await recall($)
+      if (target === undefined || lastTarget !== undefined) return // an rw call since knows better
+      show($, target)
+      await remember($, target)
+    })().catch(() => undefined)
+  })
 }
 
 export const register: Register = on => {
@@ -331,15 +386,42 @@ export const register: Register = on => {
     return { ...described, argumentHint: `${names.join(' | ')} | <host>[:<dir>] | ls   [task | /remote-skill]` }
   })
 
+  // Earlier versions pinned the target as a status line; clear one left from before a reload. Then
+  // show the session's target again: this fires at every load of the module, the first included.
+  on('session.start', ($, e, next) => {
+    $.ui.status(undefined)
+    restore($)
+    return next(e)
+  })
+
+  // A /clear goes on in a conversation that has not used rw; a resume brings back one that may have.
+  on('session.end', async ($, e, next) => {
+    const ended = await next(e)
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      show($, undefined)
+      restore($, e.sessionId)
+    }
+    return ended
+  })
+
+  // The target sits at the right of the prompt footer's first row (beside a configured status line),
+  // after the engine's own dim mode labels, rather than on a status line of its own. It keeps the
+  // color the engine gave it as a plugin status line (the theme's warning color), so it stands out.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    const own = await next(e)
+    if (!lastTarget) return own
+    const { Box, Text } = $.ui.resolve(e)
+    const label = Text({ color: 'warning', children: `rw: ${lastTarget}` })
+    return Box({ gap: 2, children: e.props.modes.length ? [own, label] : [label] })
+  })
+
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ran = await next(e)
     const target = workedIn(e.command, ran.text)
-    if (target) $.ui.status(target) // drawn as "rw: <target>"
+    if (target && target !== lastTarget) {
+      show($, target)
+      void remember($, target).catch(() => undefined)
+    }
     return ran
-  })
-
-  on('session.end', ($, e, next) => {
-    $.ui.status(undefined)
-    return next(e)
   })
 }

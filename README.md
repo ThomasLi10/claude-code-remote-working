@@ -40,7 +40,7 @@ git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/cl
 
 `install.sh` links `~/.claude/skills/rw` to `skills/rw` in the checkout and creates `~/.config/claude-rw/aliases` from the example. An existing `~/.claude/skills/rw` is moved to `~/.local/state/claude-rw/backups/` first, and its `aliases` file is carried over. The script is safe to run again.
 
-The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude Code loads from the skills folder by itself. Its hooks complete hosts, remote directories, aliases and remote skills after `/rw`, show the current target in the status line, answer `/rw ls` without a model call, keep a turn from ending with unpushed edits, and clean up mirrors at session end, so there is nothing to add to `settings.json`.
+The skill directory is also a Claude Code plugin, `rw@skills-dir`, which Claude Code loads from the skills folder by itself. Its hooks complete hosts, remote directories, aliases and remote skills after `/rw`, show the current target at the right of the prompt footer, answer `/rw ls` without a model call, keep a turn from ending with unpushed edits, and clean up mirrors at session end, so there is nothing to add to `settings.json`.
 
 **Check:** `~/.claude/skills/rw/rw doctor <host or alias>` checks the local setup, then whether ssh logs in without prompts, the tools on the remote, the captured shell environment and the directory, and says what to fix.
 
@@ -65,7 +65,7 @@ The prompt box completes as you type:
 - Taking a host writes `host:` and lists the directories in its home; taking a directory lists its subdirectories, so you can walk down to the project. Git repos are marked.
 - After `/rw <target> /` it lists the skills installed on that host.
 
-Remote directories are listed ahead of you, over rw's shared ssh connection: `/rw` opens the connections of your aliases' hosts and lists their home and root, typing a host's name does the same for it, and each listing brings the next level along, so taking a directory shows its subdirectories at once. On a slow link the first listing of a directory can take a second or two; its rows join the list when they arrive, and Tab takes one from there. The status line under the prompt shows the target rw last worked in.
+Remote directories are listed ahead of you, over rw's shared ssh connection: `/rw` opens the connections of your aliases' hosts and lists their home and root, typing a host's name does the same for it, and each listing brings the next level along, so taking a directory shows its subdirectories at once. On a slow link the first listing of a directory can take a second or two; its rows join the list when they arrive, and Tab takes one from there. The prompt footer shows the target rw last worked in, at its right.
 
 Claude keeps working on the remote until you switch targets or tell it to stop. To add an alias, ask: "add an rw alias `api` for devbox:/home/alice/code/api".
 
@@ -124,7 +124,7 @@ skills/rw/rw                        the bash tool behind it: run, path, pull, pu
 skills/rw/aliases.example           template for ~/.config/claude-rw/aliases
 skills/rw/.claude-plugin/plugin.json
 skills/rw/hooks/hooks.json          plugin hooks: instant /rw ls, session-end cleanup
-skills/rw/hooks/register.ts         completion and status line for /rw (a hooks module)
+skills/rw/hooks/register.ts         completion and footer target for /rw (a hooks module)
 ```
 
 ## License

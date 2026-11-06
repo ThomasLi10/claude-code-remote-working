@@ -40,7 +40,7 @@ git clone https://github.com/ThomasLi10/claude-code-remote-working.git ~/code/cl
 
 `install.sh` 会把 `~/.claude/skills/rw` 软链到仓库里的 `skills/rw`，并用模板生成 `~/.config/claude-rw/aliases`。如果 `~/.claude/skills/rw` 已经存在，会先整个移到 `~/.local/state/claude-rw/backups/`，其中的 `aliases` 文件会迁移过来。脚本可以重复执行。
 
-skill 目录本身也是一个 Claude Code 插件（`rw@skills-dir`），Claude Code 会从 skills 目录自动加载它。插件的 hook 负责：`/rw` 之后补全 host、远端目录、alias 和远端 skill；在状态栏显示当前目标；不经模型直接响应 `/rw ls`；镜像里还有未同步的修改时不让这一轮结束；会话结束时清理镜像。所以不需要改 `settings.json`。
+skill 目录本身也是一个 Claude Code 插件（`rw@skills-dir`），Claude Code 会从 skills 目录自动加载它。插件的 hook 负责：`/rw` 之后补全 host、远端目录、alias 和远端 skill；在输入框下方页脚的右侧显示当前目标；不经模型直接响应 `/rw ls`；镜像里还有未同步的修改时不让这一轮结束；会话结束时清理镜像。所以不需要改 `settings.json`。
 
 **检查**：`~/.claude/skills/rw/rw doctor <host 或 alias>` 先检查本机配置，再检查 ssh 能否免交互登录、远端工具是否齐全、shell 环境能否采集、目录是否存在，并告诉你该改什么。
 
@@ -65,7 +65,7 @@ skill 目录本身也是一个 Claude Code 插件（`rw@skills-dir`），Claude 
 - 选中一个 host 会写入 `host:` 并列出它 home 下的目录；再选中目录，就列出下一层子目录，一路走到项目目录。git 仓库会有标记。
 - 在 `/rw <目标> /` 之后，列出那台机器上安装的 skill。
 
-远端目录会提前列好，走的是 rw 共享的 ssh 连接：敲 `/rw` 时，就为 alias 涉及的机器建好连接，并列出它们的 home 和根目录；敲完一个 host 名，也会为这台机器做同样的事；每次列目录都顺带取回下一层，所以选中一个目录时，它的子目录立刻就有。链路慢时，一个目录第一次列出可能要一两秒，结果到了会加入候选列表，之后再按 Tab 选。输入框下方的状态栏会显示 rw 最近一次工作的目标。
+远端目录会提前列好，走的是 rw 共享的 ssh 连接：敲 `/rw` 时，就为 alias 涉及的机器建好连接，并列出它们的 home 和根目录；敲完一个 host 名，也会为这台机器做同样的事；每次列目录都顺带取回下一层，所以选中一个目录时，它的子目录立刻就有。链路慢时，一个目录第一次列出可能要一两秒，结果到了会加入候选列表，之后再按 Tab 选。输入框下方页脚的右侧会显示 rw 最近一次工作的目标。
 
 在你切换目标或让它停下之前，Claude 会一直在远端工作。要加 alias，直接说："加一个 rw alias `api`，指向 devbox:/home/alice/code/api"。
 
@@ -124,7 +124,7 @@ skills/rw/rw                        背后的 bash 工具：run、path、pull、
 skills/rw/aliases.example           ~/.config/claude-rw/aliases 的模板
 skills/rw/.claude-plugin/plugin.json
 skills/rw/hooks/hooks.json          插件 hook：即时的 /rw ls、会话结束时的清理
-skills/rw/hooks/register.ts         /rw 的补全和状态栏（hooks 模块）
+skills/rw/hooks/register.ts         /rw 的补全和页脚目标显示（hooks 模块）
 ```
 
 ## 许可证
