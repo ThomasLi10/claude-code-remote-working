@@ -93,7 +93,7 @@ If you don't see `rw: synced …` after an Edit or Write, the hooks aren't activ
 
 ## 5. Remote skills
 
-`info` lists the agent skills installed on the remote as `/name`: those of DIR and its repo (`.claude/skills`, `.agents/skills`, `.codex/skills`) and the remote user's (`~/.claude/skills`, `~/.agents/skills`, `~/.codex/skills`). `rw T skills` prints the same list as TSV (name, 1 if user-invoked only, description, SKILL.md). Both refresh the cache the prompt box completes `/rw <target> /…` from. They are that machine's own workflows. Run them from there; don't keep local copies.
+`info` lists the agent skills installed on the remote as `/name`: those of DIR and its repo (`.claude/skills`, `.agents/skills`, `.codex/skills`) and the remote user's (`~/.claude/skills`, `~/.agents/skills`, `~/.codex/skills`). `rw T skills` prints the same list as TSV (name, 1 if user-invoked only, description, SKILL.md). Both refresh the cache the prompt box completes `/rw <target> /…` from. While the session works in a target, its skills are also session slash commands: the user's `/name args` runs as `/rw <target> /name args`. They are that machine's own workflows. Run them from there; don't keep local copies.
 
 - The user runs one as `/rw api /run-tests [args]`: a word starting with `/` right after the target names a remote skill. In a later message they may name it as `/run-tests` inside their text ("now use /run-tests", "用 /run-tests"). A skill marked `[user-invoked only]` runs only when the user names it; you may use the others when a task clearly calls for them, as with local skills.
 - A `/name` that the remote doesn't list: say so and show the list; don't guess a near match.

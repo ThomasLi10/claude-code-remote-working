@@ -86,6 +86,7 @@ The prompt box completes as you type:
 - `/rw` lists every alias, recent target and ssh host (from `~/.ssh/config`). After `/rw ` the dim hint names your aliases, and the first letters narrow the list.
 - Taking a host writes `host:` and lists the directories in its home; taking a directory lists its subdirectories, so you can walk down to the project. Git repos are marked.
 - After `/rw <target> /` it lists the skills installed on that host.
+- Once the session works in a target (the one the prompt footer shows), that target's skills are also slash commands of the session: `/fix` lists `/fix-and-commit` among the local commands, described as `rw <target> · …`, and `/fix-and-commit args` runs `/rw <target> /fix-and-commit args` (the alias that names the target, when there is one). Switching targets swaps the list. A remote skill whose name a local command already has stays out; after a bare `/` it is listed beneath the local commands, and taking it writes `/rw <target> /name `.
 
 Remote directories are listed ahead of you, over rw's shared ssh connection: `/rw` opens the connections of your aliases' hosts and lists their home and root, typing a host's name does the same for it, and each listing brings the next level along, so taking a directory shows its subdirectories at once. On a slow link the first listing of a directory can take a second or two; its rows join the list when they arrive, and Tab takes one from there. The prompt footer shows the target rw last worked in, at its right.
 

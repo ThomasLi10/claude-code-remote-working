@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "rw",
-  "description": "Work in a directory on any SSH host as if it were your local working directory. Its hooks complete targets and remote skills after /rw, answer /rw ls without a model turn, and clean up a session's mirror of remote files when the session ends.",
+  "description": "Work in a directory on any SSH host as if it were your local working directory. Its hooks complete targets and remote skills after /rw, offer the current target's skills as slash commands, answer /rw ls without a model turn, and clean up a session's mirror of remote files when the session ends.",
   "author": {
     "name": "Thomas",
     "url": "https://github.com/ThomasLi10"

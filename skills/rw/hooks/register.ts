@@ -5,6 +5,8 @@ import type { EngineInterface, PromptAutocompleteSuggestion, Register } from 'cl
 //   /rw a<Tab>          -> the aliases, recent targets and ssh hosts (~/.ssh/config) starting with "a", and `ls`
 //   /rw host:<Tab>      -> the directories in host's home; taking one lists its subdirectories, and so on
 //   /rw api /r<Tab>     -> the agent skills on api's host, as `rw api skills` lists them
+//   /r<Tab>             -> once the session works in a target, its skills too: registered as the session's
+//                          own commands, `/run-tests args` running `/rw <target> /run-tests args`
 // The dim hint after "/rw " names the aliases, and the prompt footer shows the target rw last worked in.
 // Typing never waits long on ssh: skill lists come from the cache `rw` writes on every `info` or `skills`
 // call (a missing or old one is refreshed in the background), and remote directories are listed a level
@@ -311,7 +313,77 @@ async function suggest($: EngineInterface, text: string, start: number, token: s
     return m ? dirRows($, m[1] ?? '', m[2] ?? '') : targetRows($, token)
   }
   const target = before.match(AFTER_TARGET)?.[1]
-  return target && token.startsWith('/') ? skillRows($, target, token.slice(1)) : []
+  if (target && token.startsWith('/')) return skillRows($, target, token.slice(1))
+  return /^\s*$/.test(before) ? workingRows($, token) : []
+}
+
+// The skills of the target the session works in, as this session's own slash commands: the typeahead
+// ranks /fix-and-commit among the local commands (rows a plugin adds only ever come after all of those),
+// and `/fix-and-commit args` runs `/rw <target> /fix-and-commit args`. The target is written as the alias
+// that names it, when one does, and its skill list is the one `/rw <alias> /…` completes from. The engine
+// keeps a registered command for the whole session, so one of a target the session has left is hidden,
+// and says so when typed in full.
+type Offer = { target: string; skills: Skill[]; commands: Set<string> }
+let offer: Offer | undefined
+const registered = new Map<string, string>() // command name -> the description it was registered with
+let offering: Promise<void> = Promise.resolve()
+let offeredAt = 0
+const OFFER_MS = 30 * 1000 // when the typeahead asks, look at the target's skill list again after this
+const COMMAND_NAME = /^[A-Za-z0-9_-]{1,64}$/ // what $.command.register takes
+
+async function written($: EngineInterface, p: Paths, working: string): Promise<string> {
+  return (await aliases($, p)).find(a => a.target === working)?.name ?? working
+}
+
+// One at a time, so two target changes in a row register in order.
+function offerSkills($: EngineInterface) {
+  offeredAt = Date.now()
+  offering = offering.then(() => syncOffer($)).catch(() => undefined)
+}
+
+async function syncOffer($: EngineInterface) {
+  const working = lastTarget
+  const p = await locate($)
+  const target = working === undefined ? undefined : await written($, p, working)
+  const list = target === undefined ? [] : await skills($, p, target)
+  const local = new Set((await $.command.list()).filter(c => !registered.has(c.name)).map(c => c.name))
+  const commands = new Set<string>()
+  for (const s of list) {
+    if (!COMMAND_NAME.test(s.name) || local.has(s.name)) continue
+    const description = `rw ${target} · ${s.isUserOnly ? '[user-invoked] ' : ''}${s.description}`
+    if (registered.get(s.name) !== description) {
+      const done = await $.command.register({ name: s.name, description, argumentHint: '[args]' }).then(
+        () => true,
+        () => false,
+      )
+      if (!done) continue
+      registered.set(s.name, description)
+    }
+    commands.add(s.name)
+  }
+  offer = target === undefined ? undefined : { target, skills: list, commands }
+  $.ui.invalidate('command.describe')
+}
+
+// The skills the session's target has that are not commands (a local command has the name, say): a bare
+// "/name" opening the prompt lists them beneath the local commands, and taking one writes
+// "/rw <target> /name ". Asking also keeps the commands in step with the target's skill list.
+async function workingRows($: EngineInterface, token: string): Promise<PromptAutocompleteSuggestion[]> {
+  if (!lastTarget || !/^\/[^\s/]*$/.test(token)) return []
+  if (Date.now() - offeredAt > OFFER_MS) offerSkills($)
+  const current = offer
+  if (!current) return []
+  return current.skills.flatMap(s =>
+    s.name.startsWith(token.slice(1)) && !current.commands.has(s.name)
+      ? [
+          {
+            text: `/rw ${current.target} /${s.name} `,
+            label: `/${s.name}`,
+            description: `rw ${current.target} · ${s.isUserOnly ? '[user-invoked] ' : ''}${s.description}`,
+          },
+        ]
+      : [],
+  )
 }
 
 // Any rw call names its target: `info` prints the resolved one, the other commands take HOST:DIR.
@@ -336,6 +408,7 @@ function show($: EngineInterface, target: string | undefined) {
   if (target === lastTarget) return
   lastTarget = target
   $.ui.invalidate('ui.render')
+  offerSkills($)
 }
 
 async function remember($: EngineInterface, target: string) {
@@ -394,6 +467,32 @@ export const register: Register = on => {
     return { ...described, argumentHint: `${names.join(' | ')} | <host>[:<dir>] | ls   [task | /remote-skill]` }
   })
 
+  // A remote skill registered for a target the session has since left stays out of the typeahead.
+  on('command.describe', async ($, e, next) => {
+    const described = await next(e)
+    return registered.has(e.command) && !offer?.commands.has(e.command) ? { ...described, isHidden: true } : described
+  })
+
+  // `/fix-and-commit args` runs `/rw <target> /fix-and-commit args` once this command is done.
+  on('command.run', async ($, e, next) => {
+    if (!registered.has(e.command)) return next(e)
+    const current = offer
+    if (!current?.commands.has(e.command)) {
+      const where = current ? `rw ${current.target} has no skill /${e.command}` : 'this session works in no rw target'
+      return { text: `/${e.command} is a remote skill of an rw target; ${where}.` }
+    }
+    const args = `${current.target} /${e.command}${e.args.trim() ? ` ${e.args.trim()}` : ''}`
+    // on a timer, outside this hook: a run from inside it would wait on the command this hook is holding
+    // the skill is /rw, or rw:rw when the plugin came from a marketplace
+    $.clock.after(0, () => {
+      void $.command
+        .list()
+        .then(all => $.command.run({ command: all.some(c => c.name === 'rw') ? 'rw' : 'rw:rw', args }))
+        .catch(err => $.ui.toast(`rw: /rw ${args} did not run: ${String(err)}`))
+    })
+    return { text: `→ /rw ${args}` }
+  })
+
   // Earlier versions pinned the target as a status line; clear one left from before a reload. Then
   // show the session's target again: this fires at every load of the module, the first included.
   on('session.start', ($, e, next) => {
@@ -429,7 +528,7 @@ export const register: Register = on => {
     if (target && target !== lastTarget) {
       show($, target)
       void remember($, target).catch(() => undefined)
-    }
+    } else if (/^(info|skills)$/.test(e.command.match(RW_CALL)?.[2] ?? '')) offerSkills($) // a skill list was read again
     return ran
   })
 }
